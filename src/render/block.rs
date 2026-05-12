@@ -7,6 +7,7 @@ use comrak::nodes::{AstNode, ListType, NodeValue};
 use crate::render::image::MediaRenderer;
 use crate::render::inline;
 use crate::render::style::{Style, StyledLine, StyledSpan};
+use crate::render::table;
 use crate::render::theme::Theme;
 
 pub struct RenderContext<'r> {
@@ -180,15 +181,16 @@ fn render_block<'a>(
             out.push(line);
         }
 
-        // GFM table — placeholder until the dedicated table renderer lands.
-        NodeValue::Table(_) | NodeValue::TableRow(_) | NodeValue::TableCell => {
-            let mut line = StyledLine::new();
-            if !indent.is_empty() {
-                line.push_plain(indent.to_string());
-            }
-            line.push_styled("[table — pretty rendering pending]", Style::new().dim());
-            out.push(line);
+        NodeValue::Table(_) => {
+            let mut lines = Vec::new();
+            table::render_table(node, ctx.theme, &mut lines);
+            prepend_indent(&mut lines, indent);
+            out.extend(lines);
         }
+
+        // TableRow / TableCell are walked by the table renderer; bare
+        // occurrences would be malformed, but ignore them gracefully.
+        NodeValue::TableRow(_) | NodeValue::TableCell => {}
 
         // Anything else (footnotes, etc.) — recurse so content isn't dropped.
         _ => {

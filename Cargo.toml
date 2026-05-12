@@ -10,3 +10,4 @@ authors = ["m5d215"]
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 comrak = { version = "0.52", default-features = false }
+unicode-width = "0.2"

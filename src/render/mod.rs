@@ -11,7 +11,9 @@ pub mod block;
 pub mod image;
 pub mod inline;
 pub mod style;
+pub mod table;
 pub mod theme;
+pub mod width;
 
 pub use image::{MediaRenderer, TextOnlyRenderer};
 pub use style::{Color, Style, StyledLine, StyledSpan};
