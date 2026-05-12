@@ -375,15 +375,11 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => {
                 self.mode = Mode::Normal;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.toc_selection + 1 < self.anchors.len() {
-                    self.toc_selection += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.toc_selection + 1 < self.anchors.len() => {
+                self.toc_selection += 1;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.toc_selection > 0 {
-                    self.toc_selection -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.toc_selection > 0 => {
+                self.toc_selection -= 1;
             }
             KeyCode::Home | KeyCode::Char('g') => self.toc_selection = 0,
             KeyCode::End | KeyCode::Char('G') => self.toc_selection = self.anchors.len() - 1,
