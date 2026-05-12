@@ -131,6 +131,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Ctrl-b / PgUp", "1 画面カーソル移動 (上)"),
     ("g / Home", "カーソルを先頭へ"),
     ("G / End", "カーソルを末尾へ"),
+    ("<数字> G", "指定行へジャンプ (例: 42G で 42 行目)"),
     ("} / {", "次 / 前のセクション (見出し) へ"),
     ("y", "Yank 開始 / 選択を拡張"),
     ("Y (Shift-y)", "Yank の選択を縮小"),
@@ -188,6 +189,9 @@ struct App {
     search_cursor: Option<usize>,
     /// Live yank-mode selection. `Some` exactly when `mode == Mode::Yank`.
     yank: Option<YankSelection>,
+    /// Pending numeric count entered before a motion (e.g. `42` waiting
+    /// for `G`). Cleared by any non-digit key that isn't consuming it.
+    pending_count: Option<u32>,
     /// Filesystem watcher kept alive for the lifetime of the App so its
     /// callback continues to push events into `file_events`.
     watcher: Option<RecommendedWatcher>,
@@ -227,6 +231,7 @@ impl App {
             search_matches: Vec::new(),
             search_cursor: None,
             yank: None,
+            pending_count: None,
             watcher: None,
             file_events: None,
             watched_path: None,
@@ -393,6 +398,46 @@ impl App {
     fn handle_key_normal(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
         // Any keystroke clears a stale status message.
         self.status_message = None;
+
+        // Digit prefix accumulator: `1`-`9` always start (or extend) a
+        // pending count; `0` only extends an in-progress one (a lone `0`
+        // is reserved for future start-of-line behaviour and would
+        // otherwise swallow the bare keypress).
+        if let (KeyCode::Char(c), KeyModifiers::NONE) = (code, mods)
+            && c.is_ascii_digit()
+            && (c != '0' || self.pending_count.is_some())
+        {
+            let digit = (c as u32) - ('0' as u32);
+            let next = self
+                .pending_count
+                .unwrap_or(0)
+                .saturating_mul(10)
+                .saturating_add(digit);
+            self.pending_count = Some(next);
+            return false;
+        }
+
+        // Esc while a count is pending cancels the count instead of
+        // quitting — matches vim's "any non-consuming key clears it"
+        // rule and prevents an accidental quit mid-typing.
+        if let (KeyCode::Esc, _) = (code, mods)
+            && self.pending_count.take().is_some()
+        {
+            return false;
+        }
+
+        let count = self.pending_count.take();
+        match (code, mods) {
+            (KeyCode::Char('G'), _) | (KeyCode::End, _) => {
+                let target = count
+                    .map(|n| (n.max(1) - 1) as usize)
+                    .unwrap_or(self.last_line_index());
+                self.cursor_to(target);
+                return false;
+            }
+            _ => {}
+        }
+
         match (code, mods) {
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
@@ -425,7 +470,6 @@ impl App {
                 self.cursor_by(-self.page())
             }
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
-            (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.cursor_to(self.last_line_index()),
             (KeyCode::Char('}'), _) => self.cursor_to_next_section(),
             (KeyCode::Char('{'), _) => self.cursor_to_prev_section(),
             (KeyCode::Char('y'), _) => self.enter_yank(),
@@ -815,6 +859,11 @@ impl App {
                     self.search_query, cur, count,
                 )
             }
+        } else if let Some(n) = self.pending_count {
+            format!(
+                " {}  [count: {n}_]  G:jump  Esc:cancel  {hint} ",
+                self.title,
+            )
         } else {
             format!(
                 " {}  [{}/{}]  {hint} ",
