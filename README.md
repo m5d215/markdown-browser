@@ -57,10 +57,10 @@ Press `?` inside the TUI for the same list shown here.
 | `Enter`                        | Open focused link                               |
 | `[` / `]`                      | History back / forward                          |
 | `Backspace`                    | History back (alias)                            |
-| `j` / `k` (or `↓`/`↑`)         | Scroll one line                                 |
-| `Ctrl-d` / `Ctrl-u`            | Half-page scroll                                |
-| `Ctrl-f` / `Ctrl-b` (or `PgDn`/`PgUp`) | Full-page scroll                        |
-| `g` / `G` (or `Home`/`End`)    | Jump to top / bottom                            |
+| `j` / `k` (or `↓`/`↑`)         | Move cursor one line                            |
+| `Ctrl-d` / `Ctrl-u`            | Half-page cursor move                           |
+| `Ctrl-f` / `Ctrl-b` (or `PgDn`/`PgUp`) | Full-page cursor move                   |
+| `g` / `G` (or `Home`/`End`)    | Jump cursor to top / bottom                     |
 
 ## License
 

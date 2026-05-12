@@ -97,19 +97,22 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("[ / ]", "履歴 Back / Forward"),
     ("Backspace", "履歴 Back (別名)"),
     ("Alt-← / Alt-→", "履歴 Back / Forward (端末対応依存)"),
-    ("j / ↓", "1 行スクロール下"),
-    ("k / ↑", "1 行スクロール上"),
-    ("Ctrl-d / Ctrl-u", "半画面スクロール"),
-    ("Ctrl-f / PgDn", "1 画面スクロール下"),
-    ("Ctrl-b / PgUp", "1 画面スクロール上"),
-    ("g / Home", "先頭へジャンプ"),
-    ("G / End", "末尾へジャンプ"),
+    ("j / ↓", "カーソルを 1 行下へ"),
+    ("k / ↑", "カーソルを 1 行上へ"),
+    ("Ctrl-d / Ctrl-u", "半画面カーソル移動"),
+    ("Ctrl-f / PgDn", "1 画面カーソル移動 (下)"),
+    ("Ctrl-b / PgUp", "1 画面カーソル移動 (上)"),
+    ("g / Home", "カーソルを先頭へ"),
+    ("G / End", "カーソルを末尾へ"),
 ];
 
 #[derive(Debug, Clone)]
 struct Location {
     path: PathBuf,
-    /// Saved screen-row scroll offset (in the renderer's wrapped row space).
+    /// Logical line the cursor was on when leaving this entry.
+    cursor: usize,
+    /// Screen-row scroll offset (post-wrap), so the visible region is
+    /// restored exactly even if the wrap width happens to match.
     scroll: usize,
 }
 
@@ -123,6 +126,10 @@ struct App {
     /// `Paragraph::scroll` consumes. Heading jumps and lookups convert
     /// logical line indices through `screen_row_of`.
     scroll: usize,
+    /// Cursor position as a logical line index into `lines`. Movement keys
+    /// (j/k, Ctrl-d/u, g/G, ...) drive this; `scroll` follows via
+    /// `scroll_to_cursor`.
+    cursor_line: usize,
     body_height: u16,
     body_width: u16,
     mode: Mode,
@@ -157,6 +164,7 @@ impl App {
     fn new(doc: RenderOutput, title: String, path: PathBuf) -> Self {
         let initial = Location {
             path: path.clone(),
+            cursor: 0,
             scroll: 0,
         };
         Self {
@@ -166,6 +174,7 @@ impl App {
             title,
             path,
             scroll: 0,
+            cursor_line: 0,
             body_height: 0,
             body_width: 0,
             mode: Mode::Normal,
@@ -215,6 +224,7 @@ impl App {
     fn reload_in_place(&mut self) {
         let path = self.path.clone();
         let saved_scroll = self.scroll;
+        let saved_cursor = self.cursor_line;
         match std::fs::read_to_string(&path) {
             Ok(input) => {
                 let doc = parse_and_render(&input);
@@ -228,6 +238,7 @@ impl App {
                     let q = self.search_query.clone();
                     self.commit_search(q);
                 }
+                self.cursor_line = saved_cursor.min(self.last_line_index());
                 let max = self.max_scroll();
                 self.scroll = saved_scroll.min(max);
                 self.status_message = Some("reloaded".into());
@@ -349,18 +360,18 @@ impl App {
             (KeyCode::Char(']'), KeyModifiers::NONE) | (KeyCode::Right, KeyModifiers::ALT) => {
                 self.go_forward()
             }
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_by(1),
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_by(-1),
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.scroll_by(self.half_page()),
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => self.scroll_by(-self.half_page()),
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.cursor_by(1),
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.cursor_by(-1),
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.cursor_by(self.half_page()),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => self.cursor_by(-self.half_page()),
             (KeyCode::Char('f'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
-                self.scroll_by(self.page())
+                self.cursor_by(self.page())
             }
             (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
-                self.scroll_by(-self.page())
+                self.cursor_by(-self.page())
             }
-            (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.scroll = 0,
-            (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.scroll = self.max_scroll(),
+            (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
+            (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.cursor_to(self.last_line_index()),
             _ => {}
         }
         false
@@ -385,8 +396,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.toc_selection = self.anchors.len() - 1,
             KeyCode::Enter => {
                 let line = self.anchors[self.toc_selection].line;
-                let row = self.screen_row_of(line);
-                self.jump_and_push(row);
+                self.jump_and_push(line);
                 self.mode = Mode::Normal;
             }
             _ => {}
@@ -451,15 +461,9 @@ impl App {
     }
 
     fn scroll_to_match(&mut self, idx: usize) {
-        let m = &self.search_matches[idx];
-        let row = self.screen_row_of(m.line);
-        let height = self.body_height as usize;
-        if row < self.scroll {
-            self.scroll = row;
-        } else if height > 0 && row >= self.scroll + height {
-            self.scroll = row.saturating_sub(height / 2);
-        }
-        self.scroll = self.scroll.min(self.max_scroll());
+        let line = self.search_matches[idx].line.min(self.last_line_index());
+        self.cursor_line = line;
+        self.scroll_to_cursor();
     }
 
     fn focus_next_link(&mut self, dir: isize) {
@@ -499,14 +503,9 @@ impl App {
 
     fn scroll_to_focused(&mut self) {
         let Some(i) = self.focused_link else { return };
-        let row = self.screen_row_of(self.links[i].line);
-        let height = self.body_height as usize;
-        if row < self.scroll {
-            self.scroll = row;
-        } else if height > 0 && row >= self.scroll + height {
-            self.scroll = row.saturating_sub(height / 2);
-        }
-        self.scroll = self.scroll.min(self.max_scroll());
+        let line = self.links[i].line.min(self.last_line_index());
+        self.cursor_line = line;
+        self.scroll_to_cursor();
     }
 
     fn activate_focused_link(&mut self) {
@@ -542,15 +541,21 @@ impl App {
         }
     }
 
-    /// Push a same-document scroll position onto the history stack.
-    fn jump_and_push(&mut self, target_row: usize) {
+    /// Push a same-document jump onto the history stack. `target_line` is a
+    /// logical line index; the heading is aligned to the top of the
+    /// viewport.
+    fn jump_and_push(&mut self, target_line: usize) {
         if let Some(loc) = self.history.get_mut(self.history_cursor) {
+            loc.cursor = self.cursor_line;
             loc.scroll = self.scroll;
         }
-        self.scroll = target_row.min(self.max_scroll());
+        let target = target_line.min(self.last_line_index());
+        self.cursor_line = target;
+        self.scroll = self.screen_row_of(target).min(self.max_scroll());
         self.history.truncate(self.history_cursor + 1);
         self.history.push(Location {
             path: self.path.clone(),
+            cursor: self.cursor_line,
             scroll: self.scroll,
         });
         self.history_cursor = self.history.len() - 1;
@@ -558,8 +563,8 @@ impl App {
 
     fn navigate_within(&mut self, slug: &str) {
         if let Some(a) = self.anchors.iter().find(|a| a.slug == slug) {
-            let row = self.screen_row_of(a.line);
-            self.jump_and_push(row);
+            let line = a.line;
+            self.jump_and_push(line);
         } else {
             self.status_message = Some(format!("anchor #{slug} not found"));
         }
@@ -567,7 +572,9 @@ impl App {
 
     fn jump_to_anchor(&mut self, slug: &str) {
         if let Some(a) = self.anchors.iter().find(|a| a.slug == slug) {
-            self.scroll = self.screen_row_of(a.line).min(self.max_scroll());
+            let line = a.line.min(self.last_line_index());
+            self.cursor_line = line;
+            self.scroll = self.screen_row_of(line).min(self.max_scroll());
         } else {
             self.status_message = Some(format!("anchor #{slug} not found"));
         }
@@ -578,6 +585,7 @@ impl App {
     fn navigate(&mut self, path: &Path, anchor: Option<&str>) {
         // Save where we were leaving from.
         if let Some(loc) = self.history.get_mut(self.history_cursor) {
+            loc.cursor = self.cursor_line;
             loc.scroll = self.scroll;
         }
 
@@ -588,6 +596,7 @@ impl App {
         self.history.truncate(self.history_cursor + 1);
         self.history.push(Location {
             path: path.to_path_buf(),
+            cursor: self.cursor_line,
             scroll: self.scroll,
         });
         self.history_cursor = self.history.len() - 1;
@@ -615,11 +624,14 @@ impl App {
     fn travel(&mut self, target: usize) {
         let target_loc = self.history[target].clone();
         let leaving_scroll = self.scroll;
+        let leaving_cursor = self.cursor_line;
         if !self.load_document(&target_loc.path, None) {
             return;
         }
         self.history[self.history_cursor].scroll = leaving_scroll;
+        self.history[self.history_cursor].cursor = leaving_cursor;
         self.history_cursor = target;
+        self.cursor_line = target_loc.cursor.min(self.last_line_index());
         self.scroll = target_loc.scroll.min(self.max_scroll());
     }
 
@@ -635,6 +647,7 @@ impl App {
                 self.title = path.display().to_string();
                 self.path = path.to_path_buf();
                 self.scroll = 0;
+                self.cursor_line = 0;
                 self.focused_link = None;
                 self.toc_selection = 0;
                 // Drop search state — matches no longer point anywhere
@@ -660,12 +673,13 @@ impl App {
             return;
         }
         self.mode = Mode::Toc;
-        // Highlight the heading we're currently sitting in (compared in
-        // screen-row space, the same units `scroll` uses).
+        // Highlight the heading whose section currently contains the
+        // cursor — the deepest anchor whose line is at or above the
+        // cursor.
         self.toc_selection = self
             .anchors
             .iter()
-            .rposition(|a| self.screen_row_of(a.line) <= self.scroll)
+            .rposition(|a| a.line <= self.cursor_line)
             .unwrap_or(0);
     }
 
@@ -692,8 +706,6 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(body, body_area);
 
-        let total = self.total_screen_rows();
-        let last_visible = (self.scroll + self.body_height as usize).min(total);
         let hint = match self.mode {
             Mode::Normal => "?:help  /:find  o:toc  Tab:link  Enter:open  [/]:back/fwd  q:quit",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
@@ -717,11 +729,10 @@ impl App {
             }
         } else {
             format!(
-                " {}  [{}-{}/{}]  {hint} ",
+                " {}  [{}/{}]  {hint} ",
                 self.title,
-                self.scroll + 1,
-                last_visible,
-                total,
+                self.cursor_line + 1,
+                self.lines.len(),
             )
         };
         let status =
@@ -800,10 +811,37 @@ impl App {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn scroll_by(&mut self, delta: isize) {
-        let max = self.max_scroll() as isize;
-        let next = (self.scroll as isize) + delta;
-        self.scroll = next.clamp(0, max) as usize;
+    fn cursor_by(&mut self, delta: isize) {
+        let max = self.last_line_index() as isize;
+        let next = (self.cursor_line as isize) + delta;
+        self.cursor_line = next.clamp(0, max) as usize;
+        self.scroll_to_cursor();
+    }
+
+    fn cursor_to(&mut self, line: usize) {
+        self.cursor_line = line.min(self.last_line_index());
+        self.scroll_to_cursor();
+    }
+
+    /// Adjust `scroll` so the cursor line is visible. No-op if it already
+    /// fits in the viewport.
+    fn scroll_to_cursor(&mut self) {
+        let body_h = self.body_height as usize;
+        if body_h == 0 {
+            return;
+        }
+        let row_start = self.screen_row_of(self.cursor_line);
+        let row_end = self.screen_row_of(self.cursor_line + 1);
+        if row_start < self.scroll {
+            self.scroll = row_start;
+        } else if row_end > self.scroll + body_h {
+            self.scroll = row_end.saturating_sub(body_h);
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    fn last_line_index(&self) -> usize {
+        self.lines.len().saturating_sub(1)
     }
 
     fn max_scroll(&self) -> usize {
@@ -875,12 +913,17 @@ impl App {
         let current_search_style = Style::new().bg(Color::BrightYellow).fg(Color::Black).bold();
         let link_overlay = Style::new().reversed().bold();
 
+        // Dark blue-gray bg for the cursor line — applied per-span so it
+        // survives ratatui's wrap rendering.
+        let cursor_overlay = Style::new().bg(Color::Rgb(72, 72, 92));
+
         let mut result: Vec<Line<'static>> = Vec::with_capacity(self.lines.len());
         for (line_idx, line) in self.lines.iter().enumerate() {
             let line_matches = &matches_by_line[line_idx];
             let has_search = !line_matches.is_empty();
             let has_focused_link = focused_link_line == Some(line_idx);
-            if !has_search && !has_focused_link {
+            let is_cursor = line_idx == self.cursor_line;
+            if !has_search && !has_focused_link && !is_cursor {
                 result.push(convert_line(line));
                 continue;
             }
@@ -916,6 +959,19 @@ impl App {
                         search_style
                     };
                     apply_match_highlight(&mut working, m.char_start, m.char_end, style);
+                }
+            }
+
+            if is_cursor {
+                for span in &mut working.spans {
+                    span.style = span.style.merge(cursor_overlay);
+                }
+                let body_w = self.body_width as usize;
+                let used = spans_width(&working.spans);
+                if body_w > 0 && used < body_w {
+                    working
+                        .spans
+                        .push(StyledSpan::new(" ".repeat(body_w - used), cursor_overlay));
                 }
             }
 
