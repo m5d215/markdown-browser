@@ -938,13 +938,12 @@ impl App {
 
     fn draw_toc(&self, frame: &mut ratatui::Frame<'_>, body_area: Rect) {
         let area = centered_rect(60, 80, body_area);
+        let prefixes = toc_tree_prefixes(&self.anchors);
         let items: Vec<ListItem> = self
             .anchors
             .iter()
-            .map(|a| {
-                let indent = "  ".repeat((a.level.saturating_sub(1)) as usize);
-                ListItem::new(format!("{indent}{}", a.text))
-            })
+            .zip(prefixes)
+            .map(|(a, prefix)| ListItem::new(format!("{prefix}{}", a.text)))
             .collect();
         let list = List::new(items)
             .block(
@@ -1282,6 +1281,51 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     Layout::horizontal([Constraint::Percentage(percent_x)])
         .flex(Flex::Center)
         .split(vertical[0])[0]
+}
+
+/// Build one tree-style prefix per anchor (`├── ` / `└── ` with `│   `
+/// continuation columns for ancestors that still have siblings below).
+///
+/// A "sibling at level `d`" is the next anchor whose level is `<= d`; it
+/// counts as a sibling only when its level equals `d`. Anchors are in
+/// document order, so a single forward scan per (anchor, depth) is enough
+/// — fine for TOC sizes.
+fn toc_tree_prefixes(anchors: &[Anchor]) -> Vec<String> {
+    anchors
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let level = a.level.max(1) as usize;
+            let mut prefix = String::with_capacity(level * 4);
+            for d in 1..=level {
+                let last = is_last_at_depth(anchors, i, d);
+                let leaf = d == level;
+                prefix.push_str(match (leaf, last) {
+                    (true, false) => "├── ",
+                    (true, true) => "└── ",
+                    (false, false) => "│   ",
+                    (false, true) => "    ",
+                });
+            }
+            prefix
+        })
+        .collect()
+}
+
+/// True iff no later anchor extends the subtree at level `depth` containing
+/// `i`. We walk forward, stop the moment we leave the subtree (level <
+/// depth), and look for any equal-depth peer in between.
+fn is_last_at_depth(anchors: &[Anchor], i: usize, depth: usize) -> bool {
+    for a in &anchors[i + 1..] {
+        let lvl = a.level as usize;
+        if lvl < depth {
+            return true;
+        }
+        if lvl == depth {
+            return false;
+        }
+    }
+    true
 }
 
 impl App {
