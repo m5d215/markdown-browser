@@ -16,7 +16,8 @@ Status: early development.
 - **Styled headings, lists, blockquotes, task lists** — color and structure
 - **Line cursor with line numbers** — `j`/`k` move a logical-line cursor; the gutter shows line numbers (toggle with `#`)
 - **Yank with expand/shrink** — `y` enters yank mode and grows the selection (line → paragraph → list item / blockquote → heading section → whole document); `Y` shrinks; `Enter` copies to the OS clipboard
-- **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), and external URLs handed off to the OS
+- **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), markdown URLs fetched in-app, and other URLs handed off to the OS
+- **HTTPS URL input** — accepts an `http(s)://` URL on the command line; markdown links to remote `.md` / `.markdown` files navigate in-app, with relative links resolved against the remote document's URL
 - **History navigation** — back / forward through visited locations
 - **In-app help** — `?` shows the full keybinding list
 - **Plain-text render subcommand** — `markdown-browser render <file>` writes ANSI-styled output to stdout, suitable for piping or snapshot testing
@@ -37,8 +38,10 @@ cargo install --git https://github.com/m5d215/markdown-browser
 ## Usage
 
 ```bash
-markdown-browser <file>           # open the TUI browser
-markdown-browser render <file>    # write ANSI-styled output to stdout
+markdown-browser <file>             # open the TUI browser
+markdown-browser <url>              # open a remote markdown document
+markdown-browser render <file>      # write ANSI-styled output to stdout
+markdown-browser render <url>       # render a remote markdown document
 cat foo.md | markdown-browser render
 ```
 

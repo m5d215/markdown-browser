@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub mod ansi;
+pub mod net;
 pub mod render;
+pub mod source;
 pub mod tui;
 
 #[derive(Parser, Debug)]
@@ -12,7 +14,8 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Markdown file to open. Use "-" or omit to read from stdin.
+    /// Markdown file or `http(s)://` URL to open. Use "-" or omit to
+    /// read from stdin.
     pub file: Option<PathBuf>,
 }
 
@@ -20,7 +23,8 @@ pub struct Cli {
 pub enum Command {
     /// Render a markdown file as styled text to stdout.
     Render {
-        /// Markdown file to render. Use "-" or omit to read from stdin.
+        /// Markdown file or `http(s)://` URL to render. Use "-" or omit
+        /// to read from stdin.
         file: Option<PathBuf>,
 
         /// Force ANSI color output even when stdout is not a TTY.

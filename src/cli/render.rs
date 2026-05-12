@@ -4,6 +4,8 @@ use std::path::Path;
 use comrak::Arena;
 
 use crate::cli::ansi;
+use crate::cli::net;
+use crate::cli::source;
 use crate::render;
 
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +49,14 @@ pub fn run(file: Option<&Path>, color: ColorChoice) -> io::Result<()> {
 
 fn read_input(file: Option<&Path>) -> io::Result<String> {
     match file {
-        Some(path) if path.as_os_str() != "-" => std::fs::read_to_string(path),
+        Some(path) if path.as_os_str() != "-" => {
+            let as_str = path.to_string_lossy();
+            if source::is_url(&as_str) {
+                net::fetch(&as_str).map_err(io::Error::other)
+            } else {
+                std::fs::read_to_string(path)
+            }
+        }
         _ => {
             let mut buf = String::new();
             io::stdin().read_to_string(&mut buf)?;
