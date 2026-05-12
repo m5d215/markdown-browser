@@ -46,6 +46,13 @@ enum Mode {
     Toc,
 }
 
+#[derive(Debug, Clone)]
+struct Location {
+    path: PathBuf,
+    /// Saved screen-row scroll offset (in the renderer's wrapped row space).
+    scroll: usize,
+}
+
 struct App {
     lines: Vec<StyledLine>,
     anchors: Vec<Anchor>,
@@ -64,10 +71,18 @@ struct App {
     /// Transient one-shot message rendered into the status bar (cleared on
     /// the next user input).
     status_message: Option<String>,
+    /// Browser-style location stack. `history_cursor` points at the
+    /// currently displayed entry; anything past it is forward history.
+    history: Vec<Location>,
+    history_cursor: usize,
 }
 
 impl App {
     fn new(doc: RenderOutput, title: String, path: PathBuf) -> Self {
+        let initial = Location {
+            path: path.clone(),
+            scroll: 0,
+        };
         Self {
             lines: doc.lines,
             anchors: doc.anchors,
@@ -81,6 +96,8 @@ impl App {
             toc_selection: 0,
             focused_link: None,
             status_message: None,
+            history: vec![initial],
+            history_cursor: 0,
         }
     }
 
@@ -118,6 +135,11 @@ impl App {
             (KeyCode::Tab, _) => self.focus_next_link(1),
             (KeyCode::BackTab, _) => self.focus_next_link(-1),
             (KeyCode::Enter, _) => self.activate_focused_link(),
+            (KeyCode::Backspace, _)
+            | (KeyCode::Char('['), KeyModifiers::NONE)
+            | (KeyCode::Left, KeyModifiers::ALT) => self.go_back(),
+            (KeyCode::Char(']'), KeyModifiers::NONE)
+            | (KeyCode::Right, KeyModifiers::ALT) => self.go_forward(),
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_by(1),
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_by(-1),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.scroll_by(self.half_page()),
@@ -158,7 +180,8 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.toc_selection = self.anchors.len() - 1,
             KeyCode::Enter => {
                 let line = self.anchors[self.toc_selection].line;
-                self.scroll = self.screen_row_of(line).min(self.max_scroll());
+                let row = self.screen_row_of(line);
+                self.jump_and_push(row);
                 self.mode = Mode::Normal;
             }
             _ => {}
@@ -236,14 +259,37 @@ impl App {
                 Err(e) => self.status_message = Some(format!("open failed: {e}")),
             },
             LinkTarget::SameAnchor(slug) => {
-                self.jump_to_anchor(&slug);
+                self.navigate_within(&slug);
             }
             LinkTarget::LocalFile(path) => {
-                self.load_file(&path, None);
+                self.navigate(&path, None);
             }
             LinkTarget::LocalAnchor(path, slug) => {
-                self.load_file(&path, Some(&slug));
+                self.navigate(&path, Some(&slug));
             }
+        }
+    }
+
+    /// Push a same-document scroll position onto the history stack.
+    fn jump_and_push(&mut self, target_row: usize) {
+        if let Some(loc) = self.history.get_mut(self.history_cursor) {
+            loc.scroll = self.scroll;
+        }
+        self.scroll = target_row.min(self.max_scroll());
+        self.history.truncate(self.history_cursor + 1);
+        self.history.push(Location {
+            path: self.path.clone(),
+            scroll: self.scroll,
+        });
+        self.history_cursor = self.history.len() - 1;
+    }
+
+    fn navigate_within(&mut self, slug: &str) {
+        if let Some(a) = self.anchors.iter().find(|a| a.slug == slug) {
+            let row = self.screen_row_of(a.line);
+            self.jump_and_push(row);
+        } else {
+            self.status_message = Some(format!("anchor #{slug} not found"));
         }
     }
 
@@ -255,7 +301,59 @@ impl App {
         }
     }
 
-    fn load_file(&mut self, path: &Path, anchor: Option<&str>) {
+    /// Open a different document and record it as a new entry on the
+    /// history stack. Forward history past the cursor is discarded.
+    fn navigate(&mut self, path: &Path, anchor: Option<&str>) {
+        // Save where we were leaving from.
+        if let Some(loc) = self.history.get_mut(self.history_cursor) {
+            loc.scroll = self.scroll;
+        }
+
+        if !self.load_document(path, anchor) {
+            return;
+        }
+
+        self.history.truncate(self.history_cursor + 1);
+        self.history.push(Location {
+            path: path.to_path_buf(),
+            scroll: self.scroll,
+        });
+        self.history_cursor = self.history.len() - 1;
+    }
+
+    fn go_back(&mut self) {
+        if self.history_cursor == 0 {
+            self.status_message = Some("no further history (back)".into());
+            return;
+        }
+        self.travel(self.history_cursor - 1);
+    }
+
+    fn go_forward(&mut self) {
+        if self.history_cursor + 1 >= self.history.len() {
+            self.status_message = Some("no further history (forward)".into());
+            return;
+        }
+        self.travel(self.history_cursor + 1);
+    }
+
+    /// Move the history cursor to `target` and load that location. If the
+    /// load fails the cursor and active buffer are left unchanged so the
+    /// history stays internally consistent.
+    fn travel(&mut self, target: usize) {
+        let target_loc = self.history[target].clone();
+        let leaving_scroll = self.scroll;
+        if !self.load_document(&target_loc.path, None) {
+            return;
+        }
+        self.history[self.history_cursor].scroll = leaving_scroll;
+        self.history_cursor = target;
+        self.scroll = target_loc.scroll.min(self.max_scroll());
+    }
+
+    /// Read and re-render `path`. Returns false on error (the buffer is
+    /// left unchanged in that case); the status bar carries the reason.
+    fn load_document(&mut self, path: &Path, anchor: Option<&str>) -> bool {
         match std::fs::read_to_string(path) {
             Ok(input) => {
                 let doc = parse_and_render(&input);
@@ -270,9 +368,11 @@ impl App {
                 if let Some(slug) = anchor {
                     self.jump_to_anchor(slug);
                 }
+                true
             }
             Err(e) => {
                 self.status_message = Some(format!("open {}: {e}", path.display()));
+                false
             }
         }
     }
@@ -317,7 +417,7 @@ impl App {
         let total = self.total_screen_rows();
         let last_visible = (self.scroll + self.body_height as usize).min(total);
         let hint = match self.mode {
-            Mode::Normal => "q:quit  o:toc  Tab:link  Enter:open  j/k:scroll  g/G:top/bottom",
+            Mode::Normal => "q:quit  o:toc  Tab:link  Enter:open  [/]:back/fwd  j/k:scroll",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
         };
         let status_text = if let Some(msg) = &self.status_message {
