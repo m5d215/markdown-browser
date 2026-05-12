@@ -38,9 +38,9 @@ pub fn run(file: Option<&Path>, color: ColorChoice) -> io::Result<()> {
 
     let arena = Arena::new();
     let root = render::parse::parse(&arena, &input);
-    let lines = render::render_document(root);
+    let doc = render::render_document(root);
     let mut stdout = io::stdout().lock();
-    ansi::write_lines(&mut stdout, &lines, color.use_color())?;
+    ansi::write_lines(&mut stdout, &doc.lines, color.use_color())?;
     stdout.flush()?;
     Ok(())
 }

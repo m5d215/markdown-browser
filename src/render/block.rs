@@ -1,9 +1,11 @@
-//! Block-level rendering. Walks the comrak AST top-down, emitting
-//! `StyledLine`s. Each block is responsible for any trailing blank line that
-//! separates it from the next sibling.
+//! Block-level rendering. Walks the comrak AST top-down, emitting styled
+//! lines and recording heading anchors as it goes. Each block is responsible
+//! for any trailing blank line that separates it from the next sibling.
 
 use comrak::nodes::{AstNode, ListType, NodeValue};
 
+use crate::render::RenderOutput;
+use crate::render::anchor::{Anchor, slugify};
 use crate::render::image::MediaRenderer;
 use crate::render::inline;
 use crate::render::style::{Style, StyledLine, StyledSpan};
@@ -15,10 +17,10 @@ pub struct RenderContext<'r> {
     pub media: &'r dyn MediaRenderer,
 }
 
-pub fn render_document<'a>(root: &'a AstNode<'a>, ctx: &RenderContext<'_>) -> Vec<StyledLine> {
-    let mut out = Vec::new();
+pub fn render_document<'a>(root: &'a AstNode<'a>, ctx: &RenderContext<'_>) -> RenderOutput {
+    let mut out = RenderOutput::default();
     render_blocks(root, ctx, "", &mut out);
-    trim_trailing_blank(&mut out);
+    trim_trailing_blank(&mut out.lines);
     out
 }
 
@@ -26,12 +28,12 @@ fn render_blocks<'a>(
     parent: &'a AstNode<'a>,
     ctx: &RenderContext<'_>,
     indent: &str,
-    out: &mut Vec<StyledLine>,
+    out: &mut RenderOutput,
 ) {
     let mut first = true;
     for child in parent.children() {
         if !first {
-            out.push(StyledLine::new());
+            out.lines.push(StyledLine::new());
         }
         first = false;
         render_block(child, ctx, indent, out);
@@ -42,35 +44,54 @@ fn render_block<'a>(
     node: &'a AstNode<'a>,
     ctx: &RenderContext<'_>,
     indent: &str,
-    out: &mut Vec<StyledLine>,
+    out: &mut RenderOutput,
 ) {
     let data = node.data.borrow();
     match &data.value {
         NodeValue::Document => {
+            drop(data);
             render_blocks(node, ctx, indent, out);
         }
 
         NodeValue::Heading(h) => {
-            let style = ctx.theme.heading(h.level as u32);
-            let marker = format!("{} ", "#".repeat(h.level as usize));
+            let level = h.level;
+            drop(data);
+
+            let plain = collect_plain_text(node);
+            let slug = slugify(&plain);
+            out.anchors.push(Anchor {
+                level,
+                text: plain,
+                slug,
+                line: out.lines.len(),
+            });
+
+            let style = ctx.theme.heading(level as u32);
+            let marker = format!("{} ", "#".repeat(level as usize));
             let mut lines = vec![StyledLine::new()];
             lines[0].push_styled(marker, style);
             inline::render_inlines(node, style, ctx.theme, &mut lines);
             prepend_indent(&mut lines, indent);
-            out.extend(lines);
+            out.lines.extend(lines);
         }
 
         NodeValue::Paragraph => {
+            drop(data);
             let mut lines = Vec::new();
             inline::render_inlines(node, ctx.theme.paragraph, ctx.theme, &mut lines);
             prepend_indent(&mut lines, indent);
-            out.extend(lines);
+            out.lines.extend(lines);
         }
 
         NodeValue::BlockQuote => {
-            let mut inner = Vec::new();
+            drop(data);
+            let mut inner = RenderOutput::default();
             render_blocks(node, ctx, "", &mut inner);
-            for mut line in inner {
+            out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
+                a.line += out.lines.len();
+                a
+            }));
+            for mut line in inner.lines {
                 let marker = StyledSpan::new("│ ", ctx.theme.blockquote_marker);
                 if line.is_empty() {
                     let mut new_line = StyledLine::new();
@@ -89,17 +110,21 @@ fn render_block<'a>(
                     wrapped.push_plain(indent.to_string());
                 }
                 wrapped.spans.extend(line.spans);
-                out.push(wrapped);
+                out.lines.push(wrapped);
             }
         }
 
         NodeValue::List(list) => {
-            let mut counter = list.start.max(1);
+            let list_type = list.list_type;
+            let start = list.start;
+            let tight = list.tight;
+            drop(data);
+            let mut counter = start.max(1);
             for (idx, item) in node.children().enumerate() {
-                if idx > 0 && !list.tight {
-                    out.push(StyledLine::new());
+                if idx > 0 && !tight {
+                    out.lines.push(StyledLine::new());
                 }
-                let marker = match list.list_type {
+                let marker = match list_type {
                     ListType::Bullet => "• ".to_string(),
                     ListType::Ordered => {
                         let s = format!("{counter}. ");
@@ -112,13 +137,13 @@ fn render_block<'a>(
         }
 
         NodeValue::Item(_) => {
-            // Items are handled by their parent List, but we tolerate
-            // bare Item nodes by rendering their children.
+            drop(data);
             render_blocks(node, ctx, indent, out);
         }
 
         NodeValue::TaskItem(task) => {
             let done = task.symbol.is_some();
+            drop(data);
             let marker = if done { "[x] " } else { "[ ] " };
             let marker_style = if done {
                 ctx.theme.task_marker_done
@@ -129,21 +154,23 @@ fn render_block<'a>(
         }
 
         NodeValue::CodeBlock(code) => {
-            let fence_text = if code.info.is_empty() {
+            let info = code.info.clone();
+            let literal = code.literal.clone();
+            drop(data);
+
+            let fence_text = if info.is_empty() {
                 "```".to_string()
             } else {
-                format!("``` {}", code.info)
+                format!("``` {info}")
             };
             let mut top = StyledLine::new();
             if !indent.is_empty() {
                 top.push_plain(indent.to_string());
             }
             top.push_styled(fence_text, ctx.theme.code_fence);
-            out.push(top);
-            for raw_line in code.literal.split('\n') {
-                if raw_line.is_empty() && code.literal.ends_with('\n') {
-                    // The split produces a trailing empty piece for a
-                    // trailing newline; skip it.
+            out.lines.push(top);
+            for raw_line in literal.split('\n') {
+                if raw_line.is_empty() && literal.ends_with('\n') {
                     continue;
                 }
                 let mut line = StyledLine::new();
@@ -151,41 +178,45 @@ fn render_block<'a>(
                     line.push_plain(indent.to_string());
                 }
                 line.push_styled(raw_line.to_string(), ctx.theme.code_block);
-                out.push(line);
+                out.lines.push(line);
             }
             let mut bottom = StyledLine::new();
             if !indent.is_empty() {
                 bottom.push_plain(indent.to_string());
             }
             bottom.push_styled("```", ctx.theme.code_fence);
-            out.push(bottom);
+            out.lines.push(bottom);
         }
 
         NodeValue::HtmlBlock(html) => {
-            for raw_line in html.literal.lines() {
+            let literal = html.literal.clone();
+            drop(data);
+            for raw_line in literal.lines() {
                 let mut line = StyledLine::new();
                 if !indent.is_empty() {
                     line.push_plain(indent.to_string());
                 }
                 line.push_styled(raw_line.to_string(), ctx.theme.code_inline);
-                out.push(line);
+                out.lines.push(line);
             }
         }
 
         NodeValue::ThematicBreak => {
+            drop(data);
             let mut line = StyledLine::new();
             if !indent.is_empty() {
                 line.push_plain(indent.to_string());
             }
             line.push_styled("─".repeat(40), ctx.theme.thematic_break);
-            out.push(line);
+            out.lines.push(line);
         }
 
         NodeValue::Table(_) => {
+            drop(data);
             let mut lines = Vec::new();
             table::render_table(node, ctx.theme, &mut lines);
             prepend_indent(&mut lines, indent);
-            out.extend(lines);
+            out.lines.extend(lines);
         }
 
         // TableRow / TableCell are walked by the table renderer; bare
@@ -194,6 +225,7 @@ fn render_block<'a>(
 
         // Anything else (footnotes, etc.) — recurse so content isn't dropped.
         _ => {
+            drop(data);
             render_blocks(node, ctx, indent, out);
         }
     }
@@ -204,15 +236,20 @@ fn render_list_item<'a>(
     ctx: &RenderContext<'_>,
     indent: &str,
     marker: &str,
-    out: &mut Vec<StyledLine>,
+    out: &mut RenderOutput,
 ) {
     let marker_width = display_width(marker);
-    let child_indent = format!("{indent}{}", " ".repeat(marker_width));
 
-    let mut inner = Vec::new();
+    let mut inner = RenderOutput::default();
     render_blocks(item, ctx, "", &mut inner);
 
-    for (idx, line) in inner.into_iter().enumerate() {
+    let base_line = out.lines.len();
+    out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
+        a.line += base_line;
+        a
+    }));
+
+    for (idx, line) in inner.lines.into_iter().enumerate() {
         let mut wrapped = StyledLine::new();
         if !indent.is_empty() {
             wrapped.push_plain(indent.to_string());
@@ -223,8 +260,7 @@ fn render_list_item<'a>(
             wrapped.push_plain(" ".repeat(marker_width));
         }
         wrapped.spans.extend(line.spans);
-        out.push(wrapped);
-        let _ = &child_indent; // suppress unused-warning in the unlikely case
+        out.lines.push(wrapped);
     }
 }
 
@@ -234,14 +270,20 @@ fn render_task_item<'a>(
     indent: &str,
     marker: &str,
     marker_style: Style,
-    out: &mut Vec<StyledLine>,
+    out: &mut RenderOutput,
 ) {
     let marker_width = display_width(marker);
 
-    let mut inner = Vec::new();
+    let mut inner = RenderOutput::default();
     render_blocks(item, ctx, "", &mut inner);
 
-    for (idx, line) in inner.into_iter().enumerate() {
+    let base_line = out.lines.len();
+    out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
+        a.line += base_line;
+        a
+    }));
+
+    for (idx, line) in inner.lines.into_iter().enumerate() {
         let mut wrapped = StyledLine::new();
         if !indent.is_empty() {
             wrapped.push_plain(indent.to_string());
@@ -252,7 +294,7 @@ fn render_task_item<'a>(
             wrapped.push_plain(" ".repeat(marker_width));
         }
         wrapped.spans.extend(line.spans);
-        out.push(wrapped);
+        out.lines.push(wrapped);
     }
 }
 
@@ -275,6 +317,29 @@ fn trim_trailing_blank(out: &mut Vec<StyledLine>) {
 }
 
 fn display_width(s: &str) -> usize {
-    // ASCII-only call sites for now; widen when CJK markers appear.
     s.chars().count()
+}
+
+/// Flatten a heading's inline children into plain text — used for the TOC and
+/// anchor slugs. Code spans contribute their literal text; emphasis et al.
+/// are unwrapped.
+fn collect_plain_text<'a>(node: &'a AstNode<'a>) -> String {
+    let mut buf = String::new();
+    walk_plain(node, &mut buf);
+    buf.trim().to_string()
+}
+
+fn walk_plain<'a>(node: &'a AstNode<'a>, out: &mut String) {
+    let data = node.data.borrow();
+    match &data.value {
+        NodeValue::Text(t) => out.push_str(t),
+        NodeValue::Code(c) => out.push_str(&c.literal),
+        NodeValue::SoftBreak | NodeValue::LineBreak => out.push(' '),
+        _ => {
+            drop(data);
+            for child in node.children() {
+                walk_plain(child, out);
+            }
+        }
+    }
 }

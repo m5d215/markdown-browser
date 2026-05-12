@@ -4,17 +4,16 @@ use std::path::{Path, PathBuf};
 use comrak::Arena;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::render;
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
+use crate::render::width::spans_width;
+use crate::render::{self, Anchor, RenderOutput};
 
 pub fn run(file: Option<&Path>) -> io::Result<()> {
-    // The TUI consumes stdin for keystrokes, so it can't also accept
-    // markdown via the pipe. Demand a file path.
     let path = match file {
         Some(p) if p.as_os_str() != "-" => p.to_path_buf(),
         Some(_) | None => {
@@ -26,38 +25,55 @@ pub fn run(file: Option<&Path>) -> io::Result<()> {
     };
 
     let input = std::fs::read_to_string(&path)?;
-    let lines = parse_and_render(&input);
+    let doc = parse_and_render(&input);
     let title = path.display().to_string();
 
     ratatui::run(|terminal| {
-        let mut app = App::new(lines, title, path);
+        let mut app = App::new(doc, title, path);
         app.run(terminal)
     })
 }
 
-fn parse_and_render(input: &str) -> Vec<StyledLine> {
+fn parse_and_render(input: &str) -> RenderOutput {
     let arena = Arena::new();
     let root = render::parse::parse(&arena, input);
     render::render_document(root)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    Toc,
+}
+
 struct App {
     lines: Vec<StyledLine>,
+    anchors: Vec<Anchor>,
     title: String,
     #[allow(dead_code)]
     path: PathBuf,
+    /// Scroll offset measured in **screen rows** (after wrap), matching what
+    /// `Paragraph::scroll` consumes. Heading jumps and lookups convert
+    /// logical line indices through `screen_row_of`.
     scroll: usize,
     body_height: u16,
+    body_width: u16,
+    mode: Mode,
+    toc_selection: usize,
 }
 
 impl App {
-    fn new(lines: Vec<StyledLine>, title: String, path: PathBuf) -> Self {
+    fn new(doc: RenderOutput, title: String, path: PathBuf) -> Self {
         Self {
-            lines,
+            lines: doc.lines,
+            anchors: doc.anchors,
             title,
             path,
             scroll: 0,
             body_height: 0,
+            body_width: 0,
+            mode: Mode::Normal,
+            toc_selection: 0,
         }
     }
 
@@ -76,9 +92,20 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        match self.mode {
+            Mode::Normal => self.handle_key_normal(code, mods),
+            Mode::Toc => {
+                self.handle_key_toc(code, mods);
+                false
+            }
+        }
+    }
+
+    fn handle_key_normal(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
         match (code, mods) {
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Char('o'), _) => self.open_toc(),
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_by(1),
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_by(-1),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.scroll_by(self.half_page()),
@@ -96,6 +123,50 @@ impl App {
         false
     }
 
+    fn handle_key_toc(&mut self, code: KeyCode, _mods: KeyModifiers) {
+        if self.anchors.is_empty() {
+            self.mode = Mode::Normal;
+            return;
+        }
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.toc_selection + 1 < self.anchors.len() {
+                    self.toc_selection += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.toc_selection > 0 {
+                    self.toc_selection -= 1;
+                }
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.toc_selection = 0,
+            KeyCode::End | KeyCode::Char('G') => self.toc_selection = self.anchors.len() - 1,
+            KeyCode::Enter => {
+                let line = self.anchors[self.toc_selection].line;
+                self.scroll = self.screen_row_of(line).min(self.max_scroll());
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_toc(&mut self) {
+        if self.anchors.is_empty() {
+            return;
+        }
+        self.mode = Mode::Toc;
+        // Highlight the heading we're currently sitting in (compared in
+        // screen-row space, the same units `scroll` uses).
+        self.toc_selection = self
+            .anchors
+            .iter()
+            .rposition(|a| self.screen_row_of(a.line) <= self.scroll)
+            .unwrap_or(0);
+    }
+
     fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.area();
         let chunks = Layout::default()
@@ -106,6 +177,7 @@ impl App {
         let status_area = chunks[1];
 
         self.body_height = body_area.height;
+        self.body_width = body_area.width;
 
         let max_scroll = self.max_scroll();
         if self.scroll > max_scroll {
@@ -118,18 +190,50 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(body, body_area);
 
-        let total = self.lines.len();
+        let total = self.total_screen_rows();
         let last_visible = (self.scroll + self.body_height as usize).min(total);
-        let status_text = format!(
-            " {}  [{}-{}/{}]  q:quit  j/k:scroll  g/G:top/bottom  C-d/C-u:half  C-f/C-b:page ",
-            self.title,
-            self.scroll + 1,
-            last_visible,
-            total,
-        );
+        let hint = match self.mode {
+            Mode::Normal => "q:quit  o:toc  j/k:scroll  g/G:top/bottom  C-d/C-u:half  C-f/C-b:page",
+            Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
+        };
+        let status_text = format!(" {}  [{}-{}/{}]  {hint} ", self.title, self.scroll + 1, last_visible, total);
         let status = Paragraph::new(status_text)
             .style(RStyle::default().add_modifier(Modifier::REVERSED));
         frame.render_widget(status, status_area);
+
+        if self.mode == Mode::Toc && !self.anchors.is_empty() {
+            self.draw_toc(frame, body_area);
+        }
+    }
+
+    fn draw_toc(&self, frame: &mut ratatui::Frame<'_>, body_area: Rect) {
+        let area = centered_rect(60, 80, body_area);
+        let items: Vec<ListItem> = self
+            .anchors
+            .iter()
+            .map(|a| {
+                let indent = "  ".repeat((a.level.saturating_sub(1)) as usize);
+                ListItem::new(format!("{indent}{}", a.text))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" Contents "),
+            )
+            .highlight_style(
+                RStyle::default()
+                    .fg(RColor::Black)
+                    .bg(RColor::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(" › ");
+        let mut state = ListState::default();
+        state.select(Some(self.toc_selection));
+        frame.render_widget(Clear, area);
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn scroll_by(&mut self, delta: isize) {
@@ -139,8 +243,7 @@ impl App {
     }
 
     fn max_scroll(&self) -> usize {
-        self.lines
-            .len()
+        self.total_screen_rows()
             .saturating_sub(self.body_height as usize)
     }
 
@@ -151,6 +254,44 @@ impl App {
     fn page(&self) -> isize {
         (self.body_height as isize).max(1)
     }
+
+    /// Total wrapped screen-row count for the whole document.
+    fn total_screen_rows(&self) -> usize {
+        self.compute_screen_rows(self.lines.len())
+    }
+
+    /// Screen row at which logical line `until` begins.
+    fn screen_row_of(&self, until: usize) -> usize {
+        self.compute_screen_rows(until)
+    }
+
+    fn compute_screen_rows(&self, until: usize) -> usize {
+        let body_w = (self.body_width as usize).max(1);
+        let end = until.min(self.lines.len());
+        let mut rows = 0usize;
+        for line in &self.lines[..end] {
+            rows += wrapped_rows(line, body_w);
+        }
+        rows
+    }
+}
+
+fn wrapped_rows(line: &StyledLine, body_w: usize) -> usize {
+    let w = spans_width(&line.spans);
+    if w == 0 {
+        1
+    } else {
+        w.div_ceil(body_w).max(1)
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([Constraint::Percentage(percent_y)])
+        .flex(Flex::Center)
+        .split(area);
+    Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(Flex::Center)
+        .split(vertical[0])[0]
 }
 
 fn convert_line(line: &StyledLine) -> Line<'static> {
@@ -209,4 +350,3 @@ fn to_ratatui_color(c: Color) -> RColor {
         Color::BrightWhite => RColor::White,
     }
 }
-
