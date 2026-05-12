@@ -35,11 +35,11 @@ impl ColorChoice {
     }
 }
 
-pub fn run(file: Option<&Path>, color: ColorChoice) -> io::Result<()> {
+pub fn run(file: Option<&Path>, color: ColorChoice, emoji: bool) -> io::Result<()> {
     let input = read_input(file)?;
 
     let arena = Arena::new();
-    let root = render::parse::parse(&arena, &input);
+    let root = render::parse::parse(&arena, &input, emoji);
     let doc = render::render_document(root);
     let mut stdout = io::stdout().lock();
     ansi::write_lines(&mut stdout, &doc.lines, color.use_color())?;

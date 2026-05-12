@@ -20,7 +20,7 @@ use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
 use crate::render::{self, Anchor, BlockKind, BlockRange, Link, RenderOutput};
 
-pub fn run(arg: Option<&Path>) -> io::Result<()> {
+pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
     let arg = match arg {
         Some(p) if p.as_os_str() != "-" => p,
         Some(_) | None => {
@@ -33,7 +33,7 @@ pub fn run(arg: Option<&Path>) -> io::Result<()> {
     let source = Source::from_arg(&arg.to_string_lossy());
 
     let input = read_source(&source).map_err(io::Error::other)?;
-    let doc = parse_and_render(&input);
+    let doc = parse_and_render(&input, emoji);
     let title = source.display();
 
     // Start a filesystem watcher that pings the main loop whenever the
@@ -55,7 +55,7 @@ pub fn run(arg: Option<&Path>) -> io::Result<()> {
         .ok();
 
     ratatui::run(move |terminal| {
-        let mut app = App::new(doc, title, source);
+        let mut app = App::new(doc, title, source, input, emoji);
         if let Some(w) = watcher {
             app.attach_watcher(w, rx);
         }
@@ -70,9 +70,9 @@ fn read_source(source: &Source) -> Result<String, String> {
     }
 }
 
-fn parse_and_render(input: &str) -> RenderOutput {
+fn parse_and_render(input: &str, shortcodes: bool) -> RenderOutput {
     let arena = Arena::new();
-    let root = render::parse::parse(&arena, input);
+    let root = render::parse::parse(&arena, input, shortcodes);
     render::render_document(root)
 }
 
@@ -117,6 +117,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("?", "このヘルプを開閉"),
     ("o", "目次オーバーレイ"),
     ("#", "行番号の表示 ON/OFF"),
+    ("e", "絵文字 shortcode (`:rocket:`) の展開 ON/OFF"),
     ("/", "検索を開始 (Enter で確定 / Esc で取り消し)"),
     ("n / N", "次 / 前のマッチへ"),
     ("Tab / Shift-Tab", "リンクをフォーカス移動"),
@@ -192,6 +193,12 @@ struct App {
     /// Pending numeric count entered before a motion (e.g. `42` waiting
     /// for `G`). Cleared by any non-digit key that isn't consuming it.
     pending_count: Option<u32>,
+    /// Raw markdown source for the active buffer, kept so toggles
+    /// (emoji on/off, etc.) can re-parse without re-fetching.
+    raw_input: String,
+    /// Whether to expand `:shortcode:` to its emoji during parse. Toggle
+    /// with `e`.
+    shortcodes: bool,
     /// Filesystem watcher kept alive for the lifetime of the App so its
     /// callback continues to push events into `file_events`.
     watcher: Option<RecommendedWatcher>,
@@ -202,7 +209,13 @@ struct App {
 }
 
 impl App {
-    fn new(doc: RenderOutput, title: String, source: Source) -> Self {
+    fn new(
+        doc: RenderOutput,
+        title: String,
+        source: Source,
+        raw_input: String,
+        shortcodes: bool,
+    ) -> Self {
         let initial = Location {
             source: source.clone(),
             cursor: 0,
@@ -232,6 +245,8 @@ impl App {
             search_cursor: None,
             yank: None,
             pending_count: None,
+            raw_input,
+            shortcodes,
             watcher: None,
             file_events: None,
             watched_path: None,
@@ -279,7 +294,8 @@ impl App {
         let saved_cursor = self.cursor_line;
         match std::fs::read_to_string(&path) {
             Ok(input) => {
-                let doc = parse_and_render(&input);
+                let doc = parse_and_render(&input, self.shortcodes);
+                self.raw_input = input;
                 self.lines = doc.lines;
                 self.anchors = doc.anchors;
                 self.links = doc.links;
@@ -472,6 +488,7 @@ impl App {
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
             (KeyCode::Char('}'), _) => self.cursor_to_next_section(),
             (KeyCode::Char('{'), _) => self.cursor_to_prev_section(),
+            (KeyCode::Char('e'), _) => self.toggle_shortcodes(),
             (KeyCode::Char('y'), _) => self.enter_yank(),
             _ => {}
         }
@@ -756,7 +773,8 @@ impl App {
         }
         match read_source(source) {
             Ok(input) => {
-                let doc = parse_and_render(&input);
+                let doc = parse_and_render(&input, self.shortcodes);
+                self.raw_input = input;
                 self.lines = doc.lines;
                 self.anchors = doc.anchors;
                 self.links = doc.links;
@@ -1057,6 +1075,34 @@ impl App {
         // Wrap geometry changed — re-pin the viewport on the cursor so we
         // don't end up looking at the wrong region.
         self.scroll_to_cursor();
+    }
+
+    /// Re-parse the cached buffer with the opposite `shortcodes` setting.
+    /// Line counts can change (a `:rocket:` is one cell shorter than
+    /// `:rocket:` text), so re-pin the viewport on the cursor afterwards.
+    fn toggle_shortcodes(&mut self) {
+        self.shortcodes = !self.shortcodes;
+        let doc = parse_and_render(&self.raw_input, self.shortcodes);
+        self.lines = doc.lines;
+        self.anchors = doc.anchors;
+        self.links = doc.links;
+        self.blocks = doc.blocks;
+        self.focused_link = None;
+        self.cancel_yank();
+        if !self.search_query.is_empty() {
+            let q = self.search_query.clone();
+            self.commit_search(q);
+        }
+        self.cursor_line = self.cursor_line.min(self.last_line_index());
+        self.scroll_to_cursor();
+        self.status_message = Some(
+            if self.shortcodes {
+                "emoji shortcodes: on"
+            } else {
+                "emoji shortcodes: off"
+            }
+            .into(),
+        );
     }
 
     fn enter_yank(&mut self) {

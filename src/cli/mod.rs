@@ -17,6 +17,11 @@ pub struct Cli {
     /// Markdown file or `http(s)://` URL to open. Use "-" or omit to
     /// read from stdin.
     pub file: Option<PathBuf>,
+
+    /// Disable GitHub-style emoji shortcodes (`:rocket:` stays as text).
+    /// Inside the TUI, press `e` to toggle at runtime.
+    #[arg(long, global = true)]
+    pub no_emoji: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -38,6 +43,7 @@ pub enum Command {
 }
 
 pub fn run(cli: Cli) -> std::io::Result<()> {
+    let emoji = !cli.no_emoji;
     match cli.command {
         Some(Command::Render {
             file,
@@ -46,7 +52,8 @@ pub fn run(cli: Cli) -> std::io::Result<()> {
         }) => render::run(
             file.as_deref(),
             render::ColorChoice::resolve(color, no_color),
+            emoji,
         ),
-        None => tui::run(cli.file.as_deref()),
+        None => tui::run(cli.file.as_deref(), emoji),
     }
 }

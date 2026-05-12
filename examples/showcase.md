@@ -28,6 +28,10 @@
 
 🎉 🍣 🌸 ✨ 🚀 💻 🦀 📚 🔥 🌍
 
+GitHub-style shortcode (`e` で展開を ON/OFF):
+
+:rocket: :sparkles: :tada: :+1: :heart: :crab: :sushi: :nope_not_a_real_one:
+
 合字 / 結合文字: café (combining acute) と café (precomposed) は
 見た目同じになるはず。
 

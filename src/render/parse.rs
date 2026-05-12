@@ -12,6 +12,7 @@ pub fn options() -> Options<'static> {
             table: true,
             tasklist: true,
             autolink: true,
+            shortcodes: true,
             ..Default::default()
         },
         ..Default::default()
@@ -21,9 +22,10 @@ pub fn options() -> Options<'static> {
 /// Detect a YAML (`---`) or TOML (`+++`) front matter delimiter on the
 /// first line of `input` and pick the matching delimiter for comrak so the
 /// block lands in the AST as `NodeValue::FrontMatter` instead of being
-/// parsed as content.
-pub fn options_for(input: &str) -> Options<'static> {
+/// parsed as content. `shortcodes` toggles the `:emoji:` extension.
+pub fn options_for(input: &str, shortcodes: bool) -> Options<'static> {
     let mut opts = options();
+    opts.extension.shortcodes = shortcodes;
     let first = input.lines().next().unwrap_or("").trim_end_matches('\r');
     if first == "+++" {
         opts.extension.front_matter_delimiter = Some("+++".into());
@@ -33,7 +35,7 @@ pub fn options_for(input: &str) -> Options<'static> {
     opts
 }
 
-pub fn parse<'a>(arena: &'a Arena<'a>, input: &'a str) -> &'a AstNode<'a> {
-    let opts = options_for(input);
+pub fn parse<'a>(arena: &'a Arena<'a>, input: &'a str, shortcodes: bool) -> &'a AstNode<'a> {
+    let opts = options_for(input, shortcodes);
     parse_document(arena, input, &opts)
 }
