@@ -6,6 +6,9 @@ license = "MIT"
 description = "A terminal markdown browser with first-class GFM table rendering"
 repository = "https://github.com/m5d215/markdown-browser"
 authors = ["m5d215"]
+readme = "README.md"
+keywords = ["markdown", "terminal", "tui", "viewer", "browser"]
+categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }

@@ -10,7 +10,9 @@ use ratatui::DefaultTerminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
@@ -344,8 +346,9 @@ impl App {
             (KeyCode::Backspace, _)
             | (KeyCode::Char('['), KeyModifiers::NONE)
             | (KeyCode::Left, KeyModifiers::ALT) => self.go_back(),
-            (KeyCode::Char(']'), KeyModifiers::NONE)
-            | (KeyCode::Right, KeyModifiers::ALT) => self.go_forward(),
+            (KeyCode::Char(']'), KeyModifiers::NONE) | (KeyCode::Right, KeyModifiers::ALT) => {
+                self.go_forward()
+            }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_by(1),
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_by(-1),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.scroll_by(self.half_page()),
@@ -477,10 +480,8 @@ impl App {
                 if dir > 0 {
                     self.first_link_at_or_after(self.scroll).unwrap_or(0)
                 } else {
-                    self.last_link_before(
-                        self.scroll + self.body_height as usize,
-                    )
-                    .unwrap_or(self.links.len() - 1)
+                    self.last_link_before(self.scroll + self.body_height as usize)
+                        .unwrap_or(self.links.len() - 1)
                 }
             }
         };
@@ -727,8 +728,8 @@ impl App {
                 total,
             )
         };
-        let status = Paragraph::new(status_text)
-            .style(RStyle::default().add_modifier(Modifier::REVERSED));
+        let status =
+            Paragraph::new(status_text).style(RStyle::default().add_modifier(Modifier::REVERSED));
         frame.render_widget(status, status_area);
 
         if self.mode == Mode::Toc && !self.anchors.is_empty() {
@@ -845,11 +846,7 @@ impl App {
 
 fn wrapped_rows(line: &StyledLine, body_w: usize) -> usize {
     let w = spans_width(&line.spans);
-    if w == 0 {
-        1
-    } else {
-        w.div_ceil(body_w).max(1)
-    }
+    if w == 0 { 1 } else { w.div_ceil(body_w).max(1) }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -879,10 +876,7 @@ impl App {
         // Differentiate the active match from the rest: current = solid
         // yellow on black, other = dim reverse video.
         let search_style = Style::new().reversed();
-        let current_search_style = Style::new()
-            .bg(Color::BrightYellow)
-            .fg(Color::Black)
-            .bold();
+        let current_search_style = Style::new().bg(Color::BrightYellow).fg(Color::Black).bold();
         let link_overlay = Style::new().reversed().bold();
 
         let mut result: Vec<Line<'static>> = Vec::with_capacity(self.lines.len());

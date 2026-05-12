@@ -370,11 +370,7 @@ fn shift_links(
     }));
 }
 
-fn prepend_indent(
-    lines: &mut [StyledLine],
-    links: &mut [crate::render::link::Link],
-    indent: &str,
-) {
+fn prepend_indent(lines: &mut [StyledLine], links: &mut [crate::render::link::Link], indent: &str) {
     if indent.is_empty() {
         return;
     }

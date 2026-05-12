@@ -68,10 +68,7 @@ fn render_inline<'a>(
         NodeValue::Link(link) => {
             let text_style = base.merge(theme.link_text);
             let line_before = out.len().saturating_sub(1);
-            let span_before = out
-                .last()
-                .map(|l| l.spans.len())
-                .unwrap_or(0);
+            let span_before = out.last().map(|l| l.spans.len()).unwrap_or(0);
 
             for child in node.children() {
                 render_inline(child, text_style, theme, out, links);

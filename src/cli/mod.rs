@@ -39,7 +39,10 @@ pub fn run(cli: Cli) -> std::io::Result<()> {
             file,
             color,
             no_color,
-        }) => render::run(file.as_deref(), render::ColorChoice::resolve(color, no_color)),
+        }) => render::run(
+            file.as_deref(),
+            render::ColorChoice::resolve(color, no_color),
+        ),
         None => tui::run(cli.file.as_deref()),
     }
 }

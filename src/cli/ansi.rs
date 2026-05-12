@@ -6,11 +6,7 @@ use crate::render::style::{Color, Style, StyledLine};
 
 /// Write rendered lines to `out`. When `colored` is false, styling is
 /// stripped (suitable for non-TTY destinations).
-pub fn write_lines<W: Write>(
-    out: &mut W,
-    lines: &[StyledLine],
-    colored: bool,
-) -> io::Result<()> {
+pub fn write_lines<W: Write>(out: &mut W, lines: &[StyledLine], colored: bool) -> io::Result<()> {
     for line in lines {
         for span in &line.spans {
             if colored && !span.style.is_default() {

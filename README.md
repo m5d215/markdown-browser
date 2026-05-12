@@ -6,28 +6,22 @@ Status: early development.
 
 ## Features
 
-### Core
-
 - **TUI-first navigation** — a full-screen interactive browser, not just a one-shot pretty printer
 - **GFM table rendering** — proper column widths with East Asian Width and ANSI-aware sizing
 - **Table of contents overlay** — heading outline accessible from any view
+- **Incremental search** — `/` to type, `n` / `N` to step through hits
+- **Auto-reload on file change** — edit a file in another window, the buffer refreshes
 - **Syntax-highlighted code blocks** — via `syntect`
-- **Styled headings, lists, blockquotes** — color and structure
-- **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), and external URLs delegated to `open`
-- **History navigation** — back/forward through visited locations
+- **Styled headings, lists, blockquotes, task lists** — color and structure
+- **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), and external URLs handed off to the OS
+- **History navigation** — back / forward through visited locations
+- **In-app help** — `?` shows the full keybinding list
 - **Plain-text render subcommand** — `markdown-browser render <file>` writes ANSI-styled output to stdout, suitable for piping or snapshot testing
 
-### Planned extensions
+### Roadmap
 
-- Incremental search (`/` + `n`/`N`)
-- Auto-reload on file change
 - Yank code block to clipboard
-- Task list (`- [x]`) rendering
-- In-app help screen
 - Customizable keybindings
-
-### Future
-
 - Directory browser
 
 ### Out of scope (kept extensible)
@@ -35,7 +29,44 @@ Status: early development.
 - Image rendering (Sixel / Kitty / iTerm2 inline)
 - Mermaid diagram rendering
 
-These won't ship in the foreseeable future — the maintainer's terminal stack (Ghostty + tmux) can't render Sixel reliably — but the renderer architecture exposes a pluggable trait so an alternative implementation can be slotted in without restructuring.
+The renderer architecture exposes a pluggable trait so an alternative implementation can be slotted in later without restructuring callers.
+
+## Install
+
+```bash
+cargo install --git https://github.com/m5d215/markdown-browser
+```
+
+## Usage
+
+```bash
+markdown-browser <file>           # open the TUI browser
+markdown-browser render <file>    # write ANSI-styled output to stdout
+cat foo.md | markdown-browser render
+```
+
+`examples/showcase.md` exercises every supported feature; it doubles as a smoke
+test and a manual reference for what's covered.
+
+## Keybindings
+
+Press `?` inside the TUI for the same list shown here.
+
+| Key                            | Action                                          |
+|--------------------------------|-------------------------------------------------|
+| `q` / `Esc` / `Ctrl-C`         | Quit                                            |
+| `?`                            | Toggle help overlay                             |
+| `o`                            | Toggle table-of-contents overlay                |
+| `/`                            | Start search (`Enter` to commit, `Esc` to cancel) |
+| `n` / `N`                      | Next / previous search hit                      |
+| `Tab` / `Shift-Tab`            | Focus next / previous link                      |
+| `Enter`                        | Open focused link                               |
+| `[` / `]`                      | History back / forward                          |
+| `Backspace`                    | History back (alias)                            |
+| `j` / `k` (or `↓`/`↑`)         | Scroll one line                                 |
+| `Ctrl-d` / `Ctrl-u`            | Half-page scroll                                |
+| `Ctrl-f` / `Ctrl-b` (or `PgDn`/`PgUp`) | Full-page scroll                        |
+| `g` / `G` (or `Home`/`End`)    | Jump to top / bottom                            |
 
 ## License
 
