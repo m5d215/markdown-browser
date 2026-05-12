@@ -14,6 +14,7 @@ Status: early development.
 - **Syntax-highlighted code blocks** — via `syntect`
 - **Styled headings, lists, blockquotes, task lists** — color and structure
 - **Line cursor with line numbers** — `j`/`k` move a logical-line cursor; the gutter shows line numbers (toggle with `#`)
+- **Yank with expand/shrink** — `y` enters yank mode and grows the selection (line → paragraph → list item / blockquote → heading section → whole document); `Y` shrinks; `Enter` copies to the OS clipboard
 - **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), and external URLs handed off to the OS
 - **History navigation** — back / forward through visited locations
 - **In-app help** — `?` shows the full keybinding list
@@ -63,6 +64,10 @@ Press `?` inside the TUI for the same list shown here.
 | `Ctrl-d` / `Ctrl-u`            | Half-page cursor move                           |
 | `Ctrl-f` / `Ctrl-b` (or `PgDn`/`PgUp`) | Full-page cursor move                   |
 | `g` / `G` (or `Home`/`End`)    | Jump cursor to top / bottom                     |
+| `y`                            | Enter yank mode / expand selection              |
+| `Y` (Shift-`y`)                | Shrink yank selection                           |
+| `Enter` (in yank mode)         | Copy selection to OS clipboard                  |
+| `Esc` (in yank mode)           | Cancel yank                                     |
 
 ## License
 

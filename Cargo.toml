@@ -11,6 +11,7 @@ keywords = ["markdown", "terminal", "tui", "viewer", "browser"]
 categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
+arboard = { version = "3.6", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
 comrak = { version = "0.52", default-features = false }
 crossterm = "0.29"

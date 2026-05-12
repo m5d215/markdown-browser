@@ -4,7 +4,6 @@
 
 use comrak::nodes::{AstNode, ListType, NodeValue};
 
-use crate::render::RenderOutput;
 use crate::render::anchor::{Anchor, slugify};
 use crate::render::highlight;
 use crate::render::image::MediaRenderer;
@@ -12,6 +11,7 @@ use crate::render::inline;
 use crate::render::style::{Style, StyledLine, StyledSpan};
 use crate::render::table;
 use crate::render::theme::Theme;
+use crate::render::{BlockKind, BlockRange, RenderOutput};
 
 pub struct RenderContext<'r> {
     pub theme: &'r Theme,
@@ -72,6 +72,7 @@ fn render_block<'a>(
                 line: out.lines.len(),
             });
 
+            let start = out.lines.len();
             let style = ctx.theme.heading(level as u32);
             let marker = format!("{} ", "#".repeat(level as usize));
             let mut lines = vec![StyledLine::new()];
@@ -80,15 +81,18 @@ fn render_block<'a>(
             inline::render_inlines(node, style, ctx.theme, &mut lines, &mut links);
             prepend_indent(&mut lines, &mut links, indent);
             merge_inline(out, lines, links);
+            push_block(out, start, BlockKind::Leaf);
         }
 
         NodeValue::Paragraph => {
             drop(data);
+            let start = out.lines.len();
             let mut lines = Vec::new();
             let mut links = Vec::new();
             inline::render_inlines(node, ctx.theme.paragraph, ctx.theme, &mut lines, &mut links);
             prepend_indent(&mut lines, &mut links, indent);
             merge_inline(out, lines, links);
+            push_block(out, start, BlockKind::Leaf);
         }
 
         NodeValue::BlockQuote => {
@@ -104,6 +108,7 @@ fn render_block<'a>(
             // `indent` is set), so span indices shift right by that count.
             let span_shift = if indent.is_empty() { 1 } else { 2 };
             shift_links(out, inner.links, base_line, span_shift);
+            shift_blocks(out, inner.blocks, base_line);
             for mut line in inner.lines {
                 let marker = StyledSpan::new("│ ", ctx.theme.blockquote_marker);
                 if line.is_empty() {
@@ -125,6 +130,7 @@ fn render_block<'a>(
                 wrapped.spans.extend(line.spans);
                 out.lines.push(wrapped);
             }
+            push_block(out, base_line, BlockKind::Container);
         }
 
         NodeValue::List(list) => {
@@ -132,6 +138,7 @@ fn render_block<'a>(
             let start = list.start;
             let tight = list.tight;
             drop(data);
+            let list_start_line = out.lines.len();
             let mut counter = start.max(1);
             for (idx, item) in node.children().enumerate() {
                 if idx > 0 && !tight {
@@ -165,6 +172,7 @@ fn render_block<'a>(
                     render_list_item(item, ctx, indent, &marker, tight, out);
                 }
             }
+            push_block(out, list_start_line, BlockKind::Container);
         }
 
         NodeValue::Item(_) => {
@@ -190,6 +198,7 @@ fn render_block<'a>(
             let literal = code.literal.clone();
             drop(data);
 
+            let start = out.lines.len();
             let fence_text = if info.is_empty() {
                 "```".to_string()
             } else {
@@ -202,6 +211,7 @@ fn render_block<'a>(
             top.push_styled(fence_text, ctx.theme.code_fence);
             out.lines.push(top);
 
+            let inner_start = out.lines.len();
             let lang = info.split_whitespace().next().unwrap_or("");
             let highlighted = highlight::highlight_code(&literal, lang);
             for mut line in highlighted {
@@ -212,6 +222,16 @@ fn render_block<'a>(
                 }
                 out.lines.push(line);
             }
+            // Record the fence-less inner range as a separate Leaf so yank
+            // expansion stops at "just the code" before grabbing the
+            // surrounding ``` lines.
+            if out.lines.len() > inner_start {
+                out.blocks.push(BlockRange {
+                    start: inner_start,
+                    end: out.lines.len() - 1,
+                    kind: BlockKind::Leaf,
+                });
+            }
 
             let mut bottom = StyledLine::new();
             if !indent.is_empty() {
@@ -219,11 +239,13 @@ fn render_block<'a>(
             }
             bottom.push_styled("```", ctx.theme.code_fence);
             out.lines.push(bottom);
+            push_block(out, start, BlockKind::Leaf);
         }
 
         NodeValue::HtmlBlock(html) => {
             let literal = html.literal.clone();
             drop(data);
+            let start = out.lines.len();
             for raw_line in literal.lines() {
                 let mut line = StyledLine::new();
                 if !indent.is_empty() {
@@ -232,25 +254,30 @@ fn render_block<'a>(
                 line.push_styled(raw_line.to_string(), ctx.theme.code_inline);
                 out.lines.push(line);
             }
+            push_block(out, start, BlockKind::Leaf);
         }
 
         NodeValue::ThematicBreak => {
             drop(data);
+            let start = out.lines.len();
             let mut line = StyledLine::new();
             if !indent.is_empty() {
                 line.push_plain(indent.to_string());
             }
             line.push_styled("─".repeat(40), ctx.theme.thematic_break);
             out.lines.push(line);
+            push_block(out, start, BlockKind::Leaf);
         }
 
         NodeValue::Table(_) => {
             drop(data);
+            let start = out.lines.len();
             let mut lines = Vec::new();
             let mut links = Vec::new();
             table::render_table(node, ctx.theme, &mut lines, &mut links);
             prepend_indent(&mut lines, &mut links, indent);
             merge_inline(out, lines, links);
+            push_block(out, start, BlockKind::Leaf);
         }
 
         // TableRow / TableCell are walked by the table renderer; bare
@@ -287,6 +314,7 @@ fn render_list_item<'a>(
     // when `indent` is set. Shift link span ranges accordingly.
     let span_shift = if indent.is_empty() { 1 } else { 2 };
     shift_links(out, inner.links, base_line, span_shift);
+    shift_blocks(out, inner.blocks, base_line);
 
     for (idx, line) in inner.lines.into_iter().enumerate() {
         let mut wrapped = StyledLine::new();
@@ -301,6 +329,7 @@ fn render_list_item<'a>(
         wrapped.spans.extend(line.spans);
         out.lines.push(wrapped);
     }
+    push_block(out, base_line, BlockKind::Container);
 }
 
 fn render_task_item<'a>(
@@ -324,6 +353,7 @@ fn render_task_item<'a>(
     }));
     let span_shift = if indent.is_empty() { 1 } else { 2 };
     shift_links(out, inner.links, base_line, span_shift);
+    shift_blocks(out, inner.blocks, base_line);
 
     for (idx, line) in inner.lines.into_iter().enumerate() {
         let mut wrapped = StyledLine::new();
@@ -338,6 +368,7 @@ fn render_task_item<'a>(
         wrapped.spans.extend(line.spans);
         out.lines.push(wrapped);
     }
+    push_block(out, base_line, BlockKind::Container);
 }
 
 fn merge_inline(
@@ -368,6 +399,26 @@ fn shift_links(
         l.span_range.end += span_shift;
         l
     }));
+}
+
+fn shift_blocks(out: &mut RenderOutput, blocks: Vec<BlockRange>, base_line: usize) {
+    out.blocks.extend(blocks.into_iter().map(|mut b| {
+        b.start += base_line;
+        b.end += base_line;
+        b
+    }));
+}
+
+/// Record a block spanning `[start, out.lines.len() - 1]`. No-op if the
+/// block produced zero lines (a degenerate case).
+fn push_block(out: &mut RenderOutput, start: usize, kind: BlockKind) {
+    if out.lines.len() > start {
+        out.blocks.push(BlockRange {
+            start,
+            end: out.lines.len() - 1,
+            kind,
+        });
+    }
 }
 
 fn prepend_indent(lines: &mut [StyledLine], links: &mut [crate::render::link::Link], indent: &str) {

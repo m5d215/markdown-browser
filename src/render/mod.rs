@@ -30,6 +30,28 @@ pub struct RenderOutput {
     pub lines: Vec<StyledLine>,
     pub anchors: Vec<Anchor>,
     pub links: Vec<Link>,
+    /// Block ranges in emission order. Used by yank-mode expand/shrink to
+    /// map a cursor line to the enclosing paragraph / list-item / blockquote
+    /// / code block / table.
+    pub blocks: Vec<BlockRange>,
+}
+
+/// Inclusive line range for a markdown block.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockRange {
+    pub start: usize,
+    pub end: usize,
+    pub kind: BlockKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// Leaf block: paragraph, heading, code block, table, thematic break,
+    /// html block. The "paragraph" stop in the yank expand path.
+    Leaf,
+    /// Container block: list item or blockquote. The "enclosing container"
+    /// stop in the yank expand path.
+    Container,
 }
 
 /// Render a parsed markdown document.
