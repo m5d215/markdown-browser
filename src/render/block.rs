@@ -96,7 +96,7 @@ fn render_block<'a>(
         NodeValue::List(list) => {
             let mut counter = list.start.max(1);
             for (idx, item) in node.children().enumerate() {
-                if idx > 0 && list.tight == false {
+                if idx > 0 && !list.tight {
                     out.push(StyledLine::new());
                 }
                 let marker = match list.list_type {

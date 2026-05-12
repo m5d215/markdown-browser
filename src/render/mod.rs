@@ -10,6 +10,7 @@ use comrak::nodes::AstNode;
 pub mod block;
 pub mod image;
 pub mod inline;
+pub mod parse;
 pub mod style;
 pub mod table;
 pub mod theme;

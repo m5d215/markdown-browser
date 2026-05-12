@@ -1,8 +1,7 @@
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 
-use comrak::{Arena, Options, parse_document};
-use comrak::options::Extension;
+use comrak::Arena;
 
 use crate::cli::ansi;
 use crate::render;
@@ -38,16 +37,7 @@ pub fn run(file: Option<&Path>, color: ColorChoice) -> io::Result<()> {
     let input = read_input(file)?;
 
     let arena = Arena::new();
-    let mut opts = Options::default();
-    opts.extension = Extension {
-        strikethrough: true,
-        table: true,
-        tasklist: true,
-        autolink: true,
-        ..Default::default()
-    };
-    let root = parse_document(&arena, &input, &opts);
-
+    let root = render::parse::parse(&arena, &input);
     let lines = render::render_document(root);
     let mut stdout = io::stdout().lock();
     ansi::write_lines(&mut stdout, &lines, color.use_color())?;
