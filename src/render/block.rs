@@ -247,10 +247,10 @@ fn render_block<'a>(
         NodeValue::Table(_) => {
             drop(data);
             let mut lines = Vec::new();
-            table::render_table(node, ctx.theme, &mut lines);
-            // Tables don't expose links yet, so an empty link slice is fine.
-            prepend_indent(&mut lines, &mut [], indent);
-            out.lines.extend(lines);
+            let mut links = Vec::new();
+            table::render_table(node, ctx.theme, &mut lines, &mut links);
+            prepend_indent(&mut lines, &mut links, indent);
+            merge_inline(out, lines, links);
         }
 
         // TableRow / TableCell are walked by the table renderer; bare
