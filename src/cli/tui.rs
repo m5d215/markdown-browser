@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListSt
 
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
-use crate::render::{self, Anchor, RenderOutput};
+use crate::render::{self, Anchor, Link, RenderOutput};
 
 pub fn run(file: Option<&Path>) -> io::Result<()> {
     let path = match file {
@@ -49,8 +49,8 @@ enum Mode {
 struct App {
     lines: Vec<StyledLine>,
     anchors: Vec<Anchor>,
+    links: Vec<Link>,
     title: String,
-    #[allow(dead_code)]
     path: PathBuf,
     /// Scroll offset measured in **screen rows** (after wrap), matching what
     /// `Paragraph::scroll` consumes. Heading jumps and lookups convert
@@ -60,6 +60,10 @@ struct App {
     body_width: u16,
     mode: Mode,
     toc_selection: usize,
+    focused_link: Option<usize>,
+    /// Transient one-shot message rendered into the status bar (cleared on
+    /// the next user input).
+    status_message: Option<String>,
 }
 
 impl App {
@@ -67,6 +71,7 @@ impl App {
         Self {
             lines: doc.lines,
             anchors: doc.anchors,
+            links: doc.links,
             title,
             path,
             scroll: 0,
@@ -74,6 +79,8 @@ impl App {
             body_width: 0,
             mode: Mode::Normal,
             toc_selection: 0,
+            focused_link: None,
+            status_message: None,
         }
     }
 
@@ -102,10 +109,15 @@ impl App {
     }
 
     fn handle_key_normal(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        // Any keystroke clears a stale status message.
+        self.status_message = None;
         match (code, mods) {
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Char('o'), _) => self.open_toc(),
+            (KeyCode::Tab, _) => self.focus_next_link(1),
+            (KeyCode::BackTab, _) => self.focus_next_link(-1),
+            (KeyCode::Enter, _) => self.activate_focused_link(),
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.scroll_by(1),
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.scroll_by(-1),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.scroll_by(self.half_page()),
@@ -153,6 +165,118 @@ impl App {
         }
     }
 
+    fn focus_next_link(&mut self, dir: isize) {
+        if self.links.is_empty() {
+            return;
+        }
+        let next = match self.focused_link {
+            Some(i) => {
+                let n = self.links.len() as isize;
+                let i = i as isize + dir;
+                ((i % n + n) % n) as usize
+            }
+            None => {
+                if dir > 0 {
+                    self.first_link_at_or_after(self.scroll).unwrap_or(0)
+                } else {
+                    self.last_link_before(
+                        self.scroll + self.body_height as usize,
+                    )
+                    .unwrap_or(self.links.len() - 1)
+                }
+            }
+        };
+        self.focused_link = Some(next);
+        self.scroll_to_focused();
+    }
+
+    fn first_link_at_or_after(&self, scroll: usize) -> Option<usize> {
+        self.links
+            .iter()
+            .position(|l| self.screen_row_of(l.line) >= scroll)
+    }
+
+    fn last_link_before(&self, scroll_end: usize) -> Option<usize> {
+        self.links
+            .iter()
+            .rposition(|l| self.screen_row_of(l.line) < scroll_end)
+    }
+
+    fn scroll_to_focused(&mut self) {
+        let Some(i) = self.focused_link else { return };
+        let row = self.screen_row_of(self.links[i].line);
+        let height = self.body_height as usize;
+        if row < self.scroll {
+            self.scroll = row;
+        } else if height > 0 && row >= self.scroll + height {
+            self.scroll = row.saturating_sub(height / 2);
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    fn activate_focused_link(&mut self) {
+        let Some(i) = self.focused_link else {
+            self.status_message = Some("no link focused — press Tab to select one".into());
+            return;
+        };
+        let url = self.links[i].url.clone();
+        let parent = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let target = classify_link(&url, &parent);
+        self.execute_link(target);
+    }
+
+    fn execute_link(&mut self, target: LinkTarget) {
+        match target {
+            LinkTarget::Url(u) => match open::that_detached(&u) {
+                Ok(()) => self.status_message = Some(format!("opened: {u}")),
+                Err(e) => self.status_message = Some(format!("open failed: {e}")),
+            },
+            LinkTarget::SameAnchor(slug) => {
+                self.jump_to_anchor(&slug);
+            }
+            LinkTarget::LocalFile(path) => {
+                self.load_file(&path, None);
+            }
+            LinkTarget::LocalAnchor(path, slug) => {
+                self.load_file(&path, Some(&slug));
+            }
+        }
+    }
+
+    fn jump_to_anchor(&mut self, slug: &str) {
+        if let Some(a) = self.anchors.iter().find(|a| a.slug == slug) {
+            self.scroll = self.screen_row_of(a.line).min(self.max_scroll());
+        } else {
+            self.status_message = Some(format!("anchor #{slug} not found"));
+        }
+    }
+
+    fn load_file(&mut self, path: &Path, anchor: Option<&str>) {
+        match std::fs::read_to_string(path) {
+            Ok(input) => {
+                let doc = parse_and_render(&input);
+                self.lines = doc.lines;
+                self.anchors = doc.anchors;
+                self.links = doc.links;
+                self.title = path.display().to_string();
+                self.path = path.to_path_buf();
+                self.scroll = 0;
+                self.focused_link = None;
+                self.toc_selection = 0;
+                if let Some(slug) = anchor {
+                    self.jump_to_anchor(slug);
+                }
+            }
+            Err(e) => {
+                self.status_message = Some(format!("open {}: {e}", path.display()));
+            }
+        }
+    }
+
     fn open_toc(&mut self) {
         if self.anchors.is_empty() {
             return;
@@ -184,7 +308,7 @@ impl App {
             self.scroll = max_scroll;
         }
 
-        let lines: Vec<Line<'static>> = self.lines.iter().map(convert_line).collect();
+        let lines = self.convert_lines_for_display();
         let body = Paragraph::new(lines)
             .scroll((self.scroll as u16, 0))
             .wrap(Wrap { trim: false });
@@ -193,10 +317,20 @@ impl App {
         let total = self.total_screen_rows();
         let last_visible = (self.scroll + self.body_height as usize).min(total);
         let hint = match self.mode {
-            Mode::Normal => "q:quit  o:toc  j/k:scroll  g/G:top/bottom  C-d/C-u:half  C-f/C-b:page",
+            Mode::Normal => "q:quit  o:toc  Tab:link  Enter:open  j/k:scroll  g/G:top/bottom",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
         };
-        let status_text = format!(" {}  [{}-{}/{}]  {hint} ", self.title, self.scroll + 1, last_visible, total);
+        let status_text = if let Some(msg) = &self.status_message {
+            format!(" {} ", msg)
+        } else {
+            format!(
+                " {}  [{}-{}/{}]  {hint} ",
+                self.title,
+                self.scroll + 1,
+                last_visible,
+                total,
+            )
+        };
         let status = Paragraph::new(status_text)
             .style(RStyle::default().add_modifier(Modifier::REVERSED));
         frame.render_widget(status, status_area);
@@ -294,6 +428,47 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[0])[0]
 }
 
+impl App {
+    fn convert_lines_for_display(&self) -> Vec<Line<'static>> {
+        let mut result: Vec<Line<'static>> = self.lines.iter().map(convert_line).collect();
+        if let Some(i) = self.focused_link
+            && let Some(link) = self.links.get(i)
+            && link.line < self.lines.len()
+        {
+            let mut highlighted = self.lines[link.line].clone();
+            let overlay = Style::new().reversed().bold();
+            for span_idx in link.span_range.clone() {
+                if let Some(span) = highlighted.spans.get_mut(span_idx) {
+                    span.style = span.style.merge(overlay);
+                }
+            }
+            result[link.line] = convert_line(&highlighted);
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone)]
+enum LinkTarget {
+    Url(String),
+    SameAnchor(String),
+    LocalFile(PathBuf),
+    LocalAnchor(PathBuf, String),
+}
+
+fn classify_link(url: &str, current_dir: &Path) -> LinkTarget {
+    if url.contains("://") || url.starts_with("mailto:") || url.starts_with("tel:") {
+        return LinkTarget::Url(url.to_string());
+    }
+    if let Some(slug) = url.strip_prefix('#') {
+        return LinkTarget::SameAnchor(slug.to_string());
+    }
+    if let Some((path, anchor)) = url.split_once('#') {
+        return LinkTarget::LocalAnchor(current_dir.join(path), anchor.to_string());
+    }
+    LinkTarget::LocalFile(current_dir.join(url))
+}
+
 fn convert_line(line: &StyledLine) -> Line<'static> {
     let spans: Vec<Span<'static>> = line.spans.iter().map(convert_span).collect();
     Line::from(spans)
@@ -326,6 +501,9 @@ fn to_ratatui_style(style: Style) -> RStyle {
     }
     if style.dim {
         mods |= Modifier::DIM;
+    }
+    if style.reversed {
+        mods |= Modifier::REVERSED;
     }
     s.add_modifier(mods)
 }

@@ -42,6 +42,9 @@ fn style_prefix(style: Style) -> String {
     if style.underline {
         codes.push("4");
     }
+    if style.reversed {
+        codes.push("7");
+    }
     if style.strikethrough {
         codes.push("9");
     }

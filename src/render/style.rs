@@ -59,6 +59,7 @@ pub struct Style {
     pub underline: bool,
     pub strikethrough: bool,
     pub dim: bool,
+    pub reversed: bool,
 }
 
 impl Style {
@@ -71,6 +72,7 @@ impl Style {
             underline: false,
             strikethrough: false,
             dim: false,
+            reversed: false,
         }
     }
 
@@ -104,6 +106,11 @@ impl Style {
         self
     }
 
+    pub const fn reversed(mut self) -> Self {
+        self.reversed = true;
+        self
+    }
+
     /// Merge `other` on top of `self`. Foreground/background present in
     /// `other` win; boolean attributes OR together.
     pub fn merge(mut self, other: Style) -> Self {
@@ -118,6 +125,7 @@ impl Style {
         self.underline |= other.underline;
         self.strikethrough |= other.strikethrough;
         self.dim |= other.dim;
+        self.reversed |= other.reversed;
         self
     }
 
