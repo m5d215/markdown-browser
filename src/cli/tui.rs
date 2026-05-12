@@ -16,7 +16,7 @@ use ratatui::widgets::{
 
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
-use crate::render::{self, Anchor, Link, RenderOutput};
+use crate::render::{self, Anchor, BlockKind, BlockRange, Link, RenderOutput};
 
 pub fn run(file: Option<&Path>) -> io::Result<()> {
     let path = match file {
@@ -72,6 +72,22 @@ enum Mode {
     Toc,
     Help,
     Search,
+    Yank,
+}
+
+/// Live state for yank mode. `path` lists candidate ranges from smallest
+/// (always the single cursor line) to largest (always the whole document).
+/// `level` indexes the currently-active selection.
+#[derive(Debug, Clone)]
+struct YankSelection {
+    path: Vec<(usize, usize)>,
+    level: usize,
+}
+
+impl YankSelection {
+    fn current(&self) -> (usize, usize) {
+        self.path[self.level]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +121,10 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Ctrl-b / PgUp", "1 画面カーソル移動 (上)"),
     ("g / Home", "カーソルを先頭へ"),
     ("G / End", "カーソルを末尾へ"),
+    ("y", "Yank 開始 / 選択を拡張"),
+    ("Y (Shift-y)", "Yank の選択を縮小"),
+    ("Enter (Yank 中)", "選択範囲をクリップボードへコピー"),
+    ("Esc (Yank 中)", "Yank をキャンセル"),
 ];
 
 #[derive(Debug, Clone)]
@@ -121,6 +141,7 @@ struct App {
     lines: Vec<StyledLine>,
     anchors: Vec<Anchor>,
     links: Vec<Link>,
+    blocks: Vec<BlockRange>,
     title: String,
     path: PathBuf,
     /// Scroll offset measured in **screen rows** (after wrap), matching what
@@ -154,6 +175,8 @@ struct App {
     search_matches: Vec<MatchPos>,
     /// Index into `search_matches` for the "current" hit, if any.
     search_cursor: Option<usize>,
+    /// Live yank-mode selection. `Some` exactly when `mode == Mode::Yank`.
+    yank: Option<YankSelection>,
     /// Filesystem watcher kept alive for the lifetime of the App so its
     /// callback continues to push events into `file_events`.
     watcher: Option<RecommendedWatcher>,
@@ -174,6 +197,7 @@ impl App {
             lines: doc.lines,
             anchors: doc.anchors,
             links: doc.links,
+            blocks: doc.blocks,
             title,
             path,
             scroll: 0,
@@ -191,6 +215,7 @@ impl App {
             search_input: None,
             search_matches: Vec::new(),
             search_cursor: None,
+            yank: None,
             watcher: None,
             file_events: None,
             watched_path: None,
@@ -235,9 +260,11 @@ impl App {
                 self.lines = doc.lines;
                 self.anchors = doc.anchors;
                 self.links = doc.links;
+                self.blocks = doc.blocks;
                 self.focused_link = None;
                 self.search_matches.clear();
                 self.search_cursor = None;
+                self.cancel_yank();
                 if !self.search_query.is_empty() {
                     let q = self.search_query.clone();
                     self.commit_search(q);
@@ -302,6 +329,10 @@ impl App {
             }
             Mode::Search => {
                 self.handle_key_search(code, mods);
+                false
+            }
+            Mode::Yank => {
+                self.handle_key_yank(code, mods);
                 false
             }
         }
@@ -377,9 +408,21 @@ impl App {
             }
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
             (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.cursor_to(self.last_line_index()),
+            (KeyCode::Char('y'), _) => self.enter_yank(),
             _ => {}
         }
         false
+    }
+
+    fn handle_key_yank(&mut self, code: KeyCode, _mods: KeyModifiers) {
+        self.status_message = None;
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.cancel_yank(),
+            KeyCode::Char('y') => self.yank_expand(),
+            KeyCode::Char('Y') => self.yank_shrink(),
+            KeyCode::Enter => self.yank_copy(),
+            _ => {}
+        }
     }
 
     fn handle_key_toc(&mut self, code: KeyCode, _mods: KeyModifiers) {
@@ -649,6 +692,7 @@ impl App {
                 self.lines = doc.lines;
                 self.anchors = doc.anchors;
                 self.links = doc.links;
+                self.blocks = doc.blocks;
                 self.title = path.display().to_string();
                 self.path = path.to_path_buf();
                 self.scroll = 0;
@@ -660,6 +704,7 @@ impl App {
                 self.search_query.clear();
                 self.search_matches.clear();
                 self.search_cursor = None;
+                self.cancel_yank();
                 if let Some(slug) = anchor {
                     self.jump_to_anchor(slug);
                 }
@@ -712,13 +757,26 @@ impl App {
         frame.render_widget(body, body_area);
 
         let hint = match self.mode {
-            Mode::Normal => "?:help  /:find  o:toc  Tab:link  Enter:open  [/]:back/fwd  q:quit",
+            Mode::Normal => "?:help  /:find  o:toc  Tab:link  Enter:open  y:yank  q:quit",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
             Mode::Help => "Esc/q/?:close",
             Mode::Search => "Enter:confirm  Esc:cancel",
+            Mode::Yank => "y:expand  Y:shrink  Enter:copy  Esc:cancel",
         };
         let status_text = if let Some(input) = &self.search_input {
             format!(" /{input}_  {hint} ")
+        } else if self.mode == Mode::Yank
+            && let Some(y) = &self.yank
+        {
+            let (start, end) = y.current();
+            let n = end - start + 1;
+            format!(
+                " yank  [{}/{}]  {} line{}  {hint} ",
+                y.level + 1,
+                y.path.len(),
+                n,
+                if n == 1 { "" } else { "s" },
+            )
         } else if let Some(msg) = &self.status_message {
             format!(" {msg} ")
         } else if !self.search_query.is_empty() {
@@ -904,6 +962,170 @@ impl App {
         // don't end up looking at the wrong region.
         self.scroll_to_cursor();
     }
+
+    fn enter_yank(&mut self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let path = self.build_yank_path(self.cursor_line);
+        self.yank = Some(YankSelection { path, level: 0 });
+        self.mode = Mode::Yank;
+        self.scroll_to_yank_selection();
+    }
+
+    fn yank_expand(&mut self) {
+        let Some(y) = self.yank.as_mut() else { return };
+        if y.level + 1 < y.path.len() {
+            y.level += 1;
+            self.scroll_to_yank_selection();
+        }
+    }
+
+    fn yank_shrink(&mut self) {
+        let Some(y) = self.yank.as_mut() else { return };
+        if y.level > 0 {
+            y.level -= 1;
+            self.scroll_to_yank_selection();
+        }
+    }
+
+    fn cancel_yank(&mut self) {
+        if self.yank.take().is_some() {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn yank_copy(&mut self) {
+        let Some(y) = self.yank.clone() else { return };
+        let (start, end) = y.current();
+        let text = self.selection_text(start, end);
+        let line_count = end - start + 1;
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => {
+                self.status_message = Some(format!("yanked {line_count} lines"));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("yank failed: {e}"));
+            }
+        }
+        self.yank = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn selection_text(&self, start: usize, end: usize) -> String {
+        let end = end.min(self.last_line_index());
+        let mut out = String::new();
+        for idx in start..=end {
+            if idx > start {
+                out.push('\n');
+            }
+            for span in &self.lines[idx].spans {
+                out.push_str(&span.text);
+            }
+        }
+        out
+    }
+
+    /// Build the ordered list of candidate ranges for yank-mode expansion,
+    /// from smallest (single cursor line) to largest (whole document). Each
+    /// step must be a strict superset of the previous.
+    fn build_yank_path(&self, cursor: usize) -> Vec<(usize, usize)> {
+        let last = self.last_line_index();
+        let cursor = cursor.min(last);
+        let mut path: Vec<(usize, usize)> = vec![(cursor, cursor)];
+
+        // Step 2: every leaf block containing the cursor, smallest to
+        // largest. A regular paragraph contributes one entry; a fenced code
+        // block contributes two (inner content, then full with fences).
+        let mut leaves: Vec<&BlockRange> = self
+            .blocks
+            .iter()
+            .filter(|b| b.kind == BlockKind::Leaf && b.start <= cursor && cursor <= b.end)
+            .collect();
+        leaves.sort_by_key(|b| b.end - b.start);
+        for leaf in leaves {
+            push_strict_superset(&mut path, (leaf.start, leaf.end));
+        }
+
+        // Step 3: containers (list-item / blockquote) from innermost to
+        // outermost. Multiple nested containers contribute multiple stops.
+        let mut containers: Vec<&BlockRange> = self
+            .blocks
+            .iter()
+            .filter(|b| b.kind == BlockKind::Container && b.start <= cursor && cursor <= b.end)
+            .collect();
+        containers.sort_by_key(|b| b.end - b.start);
+        for c in containers {
+            push_strict_superset(&mut path, (c.start, c.end));
+        }
+
+        // Step 4: heading sections h6 → h5 → ... → h1, only the ones whose
+        // section currently contains the cursor.
+        let mut open: [Option<usize>; 7] = [None; 7];
+        for a in &self.anchors {
+            if a.line > cursor {
+                break;
+            }
+            let lvl = a.level.clamp(1, 6) as usize;
+            for slot in open.iter_mut().skip(lvl) {
+                *slot = None;
+            }
+            open[lvl] = Some(a.line);
+        }
+        for n in (1..=6).rev() {
+            let Some(start) = open[n] else { continue };
+            let end = self
+                .anchors
+                .iter()
+                .find(|a| a.line > start && (a.level as usize) <= n)
+                .map(|a| a.line.saturating_sub(1))
+                .unwrap_or(last);
+            push_strict_superset(&mut path, (start, end));
+        }
+
+        // Step 5: whole document.
+        push_strict_superset(&mut path, (0, last));
+
+        path
+    }
+
+    fn scroll_to_yank_selection(&mut self) {
+        let Some(y) = self.yank.as_ref() else { return };
+        let (start, end) = y.current();
+        let body_h = self.body_height as usize;
+        if body_h == 0 {
+            return;
+        }
+        let row_start = self.screen_row_of(start);
+        let row_end = self.screen_row_of(end + 1);
+        if row_start < self.scroll {
+            self.scroll = row_start;
+        } else if row_end > self.scroll + body_h {
+            // Prefer to keep the selection's top in view when it's bigger
+            // than the viewport.
+            let span = row_end.saturating_sub(row_start);
+            self.scroll = if span >= body_h {
+                row_start
+            } else {
+                row_end.saturating_sub(body_h)
+            };
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+}
+
+/// Append `range` to `path` only when it's a strict superset of the last
+/// entry. Keeps the path deduplicated and monotonically expanding.
+fn push_strict_superset(path: &mut Vec<(usize, usize)>, range: (usize, usize)) {
+    if let Some(&last) = path.last()
+        && range.0 <= last.0
+        && range.1 >= last.1
+        && (range.0 < last.0 || range.1 > last.1)
+    {
+        path.push(range);
+    } else if path.is_empty() {
+        path.push(range);
+    }
 }
 
 fn wrapped_rows(line: &StyledLine, body_w: usize) -> usize {
@@ -944,6 +1166,11 @@ impl App {
         // Dark blue-gray bg for the cursor line — applied per-span so it
         // survives ratatui's wrap rendering.
         let cursor_overlay = Style::new().bg(Color::Rgb(72, 72, 92));
+        // Distinct, more saturated bg used for the yank selection so the
+        // user can see at a glance how big the current scope is.
+        let yank_overlay = Style::new().bg(Color::Rgb(58, 78, 110));
+
+        let yank_range = self.yank.as_ref().map(|y| y.current());
 
         let show_numbers = self.show_line_numbers;
         let gutter_w = self.gutter_width();
@@ -957,7 +1184,8 @@ impl App {
             let has_search = !line_matches.is_empty();
             let has_focused_link = focused_link_line == Some(line_idx);
             let is_cursor = line_idx == self.cursor_line;
-            if !has_search && !has_focused_link && !is_cursor && !show_numbers {
+            let in_yank = yank_range.is_some_and(|(s, e)| line_idx >= s && line_idx <= e);
+            if !has_search && !has_focused_link && !is_cursor && !show_numbers && !in_yank {
                 result.push(convert_line(line));
                 continue;
             }
@@ -996,6 +1224,15 @@ impl App {
                 }
             }
 
+            // Order: yank bg goes on first as a base layer (covers entire
+            // selection); cursor-line overlay merges on top to keep the
+            // anchor row distinguishable. Both reach the right edge via
+            // the trailing-padding span below.
+            if in_yank {
+                for span in &mut working.spans {
+                    span.style = span.style.merge(yank_overlay);
+                }
+            }
             if is_cursor {
                 for span in &mut working.spans {
                     span.style = span.style.merge(cursor_overlay);
@@ -1008,6 +1245,9 @@ impl App {
                 } else {
                     normal_lineno
                 };
+                if in_yank {
+                    gstyle = gstyle.merge(yank_overlay);
+                }
                 if is_cursor {
                     gstyle = gstyle.merge(cursor_overlay);
                 }
@@ -1015,13 +1255,18 @@ impl App {
                 working.spans.insert(0, StyledSpan::new(text, gstyle));
             }
 
-            if is_cursor {
+            if is_cursor || in_yank {
                 let body_w = self.body_width as usize;
                 let used = spans_width(&working.spans);
                 if body_w > 0 && used < body_w {
+                    let pad_style = if is_cursor {
+                        cursor_overlay
+                    } else {
+                        yank_overlay
+                    };
                     working
                         .spans
-                        .push(StyledSpan::new(" ".repeat(body_w - used), cursor_overlay));
+                        .push(StyledSpan::new(" ".repeat(body_w - used), pad_style));
                 }
             }
 
