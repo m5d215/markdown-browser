@@ -83,6 +83,32 @@ enum Mode {
     Help,
     Search,
     Yank,
+    Dir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirEntryKind {
+    Parent,
+    Dir,
+    File,
+}
+
+#[derive(Debug, Clone)]
+struct DirEntry {
+    name: String,
+    kind: DirEntryKind,
+    path: PathBuf,
+}
+
+/// One row in the directory overlay. `display` is pre-rendered (tree
+/// prefix + icon + name + optional current-marker) so the renderer just
+/// concatenates strings. `kind` and `path` drive activation: re-root for
+/// Dir/Parent, open for File.
+#[derive(Debug, Clone)]
+struct DirRow {
+    kind: DirEntryKind,
+    path: PathBuf,
+    display: String,
 }
 
 /// Live state for yank mode. `path` lists candidate ranges from smallest
@@ -116,6 +142,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("q / Esc / Ctrl-C", "終了"),
     ("?", "このヘルプを開閉"),
     ("o", "目次オーバーレイ"),
+    ("d", "ディレクトリブラウザ (h/← で親 / l/→ で開く)"),
     ("#", "行番号の表示 ON/OFF"),
     ("e", "絵文字 shortcode (`:rocket:`) の展開 ON/OFF"),
     ("/", "検索を開始 (Enter で確定 / Esc で取り消し)"),
@@ -199,6 +226,14 @@ struct App {
     /// Whether to expand `:shortcode:` to its emoji during parse. Toggle
     /// with `e`.
     shortcodes: bool,
+    /// Currently displayed directory in the directory overlay. `Some`
+    /// exactly when `mode == Mode::Dir`. The view shows parent context
+    /// (siblings + parent's files) with `dir_path`'s children inlined
+    /// one level deeper, so `dir_path` is the "focused" dir, not the
+    /// outermost shown.
+    dir_path: Option<PathBuf>,
+    dir_rows: Vec<DirRow>,
+    dir_selection: usize,
     /// Filesystem watcher kept alive for the lifetime of the App so its
     /// callback continues to push events into `file_events`.
     watcher: Option<RecommendedWatcher>,
@@ -247,6 +282,9 @@ impl App {
             pending_count: None,
             raw_input,
             shortcodes,
+            dir_path: None,
+            dir_rows: Vec::new(),
+            dir_selection: 0,
             watcher: None,
             file_events: None,
             watched_path: None,
@@ -374,6 +412,10 @@ impl App {
                 self.handle_key_yank(code, mods);
                 false
             }
+            Mode::Dir => {
+                self.handle_key_dir(code, mods);
+                false
+            }
         }
     }
 
@@ -488,6 +530,7 @@ impl App {
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
             (KeyCode::Char('}'), _) => self.cursor_to_next_section(),
             (KeyCode::Char('{'), _) => self.cursor_to_prev_section(),
+            (KeyCode::Char('d'), KeyModifiers::NONE) => self.open_dir(),
             (KeyCode::Char('e'), _) => self.toggle_shortcodes(),
             (KeyCode::Char('y'), _) => self.enter_yank(),
             _ => {}
@@ -805,6 +848,117 @@ impl App {
         }
     }
 
+    /// Open the directory overlay scoped to the active file's parent.
+    /// No-op + status message for URL sources or any I/O failure — the
+    /// underlying document view stays put.
+    fn open_dir(&mut self) {
+        let Some(file) = self.source.as_file().map(Path::to_path_buf) else {
+            self.status_message = Some("directory browser unavailable for URL sources".into());
+            return;
+        };
+        let Some(parent) = file.parent() else {
+            self.status_message = Some("no parent directory".into());
+            return;
+        };
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".").to_path_buf()
+        } else {
+            parent.to_path_buf()
+        };
+        self.load_dir(dir, &file);
+    }
+
+    fn load_dir(&mut self, dir: PathBuf, focus_on: &Path) {
+        // Canonicalize so `..` keeps walking up real ancestors instead of
+        // bottoming out at the empty path that `Path::new("foo").parent()`
+        // hands back for relative inputs.
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        match build_dir_view(&dir) {
+            Ok(rows) => {
+                let selection = rows
+                    .iter()
+                    .position(|r| r.path == focus_on)
+                    .or_else(|| {
+                        // Fall back to matching by filename — useful when
+                        // `focus_on` came from a non-canonical path.
+                        let name = focus_on.file_name()?;
+                        rows.iter().position(|r| r.path.file_name() == Some(name))
+                    })
+                    .unwrap_or(0);
+                self.dir_path = Some(dir);
+                self.dir_rows = rows;
+                self.dir_selection = selection;
+                self.mode = Mode::Dir;
+            }
+            Err(e) => {
+                self.status_message = Some(format!("dir {}: {e}", dir.display()));
+            }
+        }
+    }
+
+    fn close_dir(&mut self) {
+        self.dir_path = None;
+        self.dir_rows.clear();
+        self.dir_selection = 0;
+        self.mode = Mode::Normal;
+    }
+
+    fn activate_dir_entry(&mut self) {
+        let Some(row) = self.dir_rows.get(self.dir_selection).cloned() else {
+            return;
+        };
+        match row.kind {
+            DirEntryKind::File => {
+                self.close_dir();
+                self.navigate(&Source::File(row.path), None);
+            }
+            DirEntryKind::Dir | DirEntryKind::Parent => {
+                // Activating a dir (including `..` or the parent header)
+                // re-roots the tree on that dir. `focus_on` = the new
+                // current so the selection lands on the row representing
+                // the re-rooted dir.
+                let focus = row.path.clone();
+                self.load_dir(row.path, &focus);
+            }
+        }
+    }
+
+    fn handle_key_dir(&mut self, code: KeyCode, _mods: KeyModifiers) {
+        self.status_message = None;
+        if self.dir_rows.is_empty() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => self.close_dir(),
+                _ => {}
+            }
+            return;
+        }
+        let last = self.dir_rows.len() - 1;
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => self.close_dir(),
+            KeyCode::Down | KeyCode::Char('j') if self.dir_selection < last => {
+                self.dir_selection += 1;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.dir_selection > 0 => {
+                self.dir_selection -= 1;
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.dir_selection = 0,
+            KeyCode::End | KeyCode::Char('G') => self.dir_selection = last,
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.activate_dir_entry(),
+            KeyCode::Left | KeyCode::Char('h') => self.dir_go_up(),
+            _ => {}
+        }
+    }
+
+    /// `h` / Left in the directory overlay: re-root the view on the
+    /// current dir's parent. No-op at the filesystem root.
+    fn dir_go_up(&mut self) {
+        let parent = self.dir_path.as_ref().and_then(|p| p.parent());
+        if let Some(parent) = parent {
+            let parent = parent.to_path_buf();
+            self.load_dir(parent.clone(), &parent);
+        }
+    }
+
     fn open_toc(&mut self) {
         if self.anchors.is_empty() {
             return;
@@ -844,11 +998,12 @@ impl App {
         frame.render_widget(body, body_area);
 
         let hint = match self.mode {
-            Mode::Normal => "?:help  /:find  o:toc  Tab:link  Enter:open  y:yank  q:quit",
+            Mode::Normal => "?:help  /:find  o:toc  d:dir  Tab:link  Enter:open  y:yank  q:quit",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
             Mode::Help => "Esc/q/?:close",
             Mode::Search => "Enter:confirm  Esc:cancel",
             Mode::Yank => "y:expand  Y:shrink  Enter:copy  Esc:cancel",
+            Mode::Dir => "Enter/l/→:open  h/←:up  j/k:select  Esc/q/d:close",
         };
         let status_text = if let Some(input) = &self.search_input {
             format!(" /{input}_  {hint} ")
@@ -899,6 +1054,9 @@ impl App {
         }
         if self.mode == Mode::Help {
             self.draw_help(frame, body_area);
+        }
+        if self.mode == Mode::Dir {
+            self.draw_dir(frame, body_area);
         }
     }
 
@@ -961,6 +1119,37 @@ impl App {
             .highlight_symbol(" › ");
         let mut state = ListState::default();
         state.select(Some(self.toc_selection));
+        frame.render_widget(Clear, area);
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    fn draw_dir(&self, frame: &mut ratatui::Frame<'_>, body_area: Rect) {
+        let area = centered_rect(70, 80, body_area);
+        let items: Vec<ListItem> = self
+            .dir_rows
+            .iter()
+            .map(|r| ListItem::new(r.display.clone()))
+            .collect();
+        let title = match &self.dir_path {
+            Some(p) => format!(" {} ", p.display()),
+            None => " Directory ".into(),
+        };
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(title),
+            )
+            .highlight_style(
+                RStyle::default()
+                    .fg(RColor::Black)
+                    .bg(RColor::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(" › ");
+        let mut state = ListState::default();
+        state.select(Some(self.dir_selection));
         frame.render_widget(Clear, area);
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -1281,6 +1470,188 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     Layout::horizontal([Constraint::Percentage(percent_x)])
         .flex(Flex::Center)
         .split(vertical[0])[0]
+}
+
+/// Read a directory and return the entries the overlay can usefully
+/// show: subdirectories and renderable files. Hidden entries are
+/// skipped. Sort order: dirs alphabetical, then files alphabetical with
+/// `README*` floated to the top.
+fn read_renderable_entries(path: &Path) -> std::io::Result<Vec<DirEntry>> {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let ft = entry.file_type()?;
+        let p = entry.path();
+        if ft.is_dir() {
+            dirs.push(DirEntry {
+                name,
+                kind: DirEntryKind::Dir,
+                path: p,
+            });
+        } else if ft.is_file() && is_renderable_local_file(&p) {
+            files.push(DirEntry {
+                name,
+                kind: DirEntryKind::File,
+                path: p,
+            });
+        }
+    }
+    dirs.sort_by(|a, b| a.name.cmp(&b.name));
+    files.sort_by(|a, b| {
+        let ar = a.name.to_ascii_lowercase().starts_with("readme");
+        let br = b.name.to_ascii_lowercase().starts_with("readme");
+        match (ar, br) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        }
+    });
+    let mut out = Vec::with_capacity(dirs.len() + files.len());
+    out.extend(dirs);
+    out.extend(files);
+    Ok(out)
+}
+
+/// Build the rows that the directory overlay shows. The view is
+/// `parent / cur / cur's children` (depth 0 / 1 / 2), with `..` at the
+/// top, the parent dir name as the tree root, parent's entries at
+/// depth 1, and `cur`'s entries inline-expanded under its own depth-1
+/// row. Falls back to "cur only" when `cur` has no parent.
+fn build_dir_view(cur: &Path) -> std::io::Result<Vec<DirRow>> {
+    let mut rows = Vec::new();
+    let parent = cur.parent();
+
+    if let Some(parent) = parent {
+        // `..` row: re-roots to the dir above `cur`. Use `cur.parent()`
+        // here, not `parent.parent()`, so activating `..` and pressing
+        // `h` both land on the same destination.
+        rows.push(DirRow {
+            kind: DirEntryKind::Parent,
+            path: parent.to_path_buf(),
+            display: "📁 ../".into(),
+        });
+
+        // Parent header: visual anchor for the tree, doubles as a click
+        // target — activating it does the same thing as `..`.
+        let parent_label = parent
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| format!("{n}/"))
+            .unwrap_or_else(|| parent.display().to_string());
+        rows.push(DirRow {
+            kind: DirEntryKind::Dir,
+            path: parent.to_path_buf(),
+            display: format!("📁 {parent_label}"),
+        });
+
+        let siblings = read_renderable_entries(parent)?;
+        let last = siblings.len().saturating_sub(1);
+        for (i, e) in siblings.iter().enumerate() {
+            let is_last = i == last;
+            let leaf = if is_last { "└── " } else { "├── " };
+            let is_current = e.path == cur;
+            let marker = if is_current { "  ◀" } else { "" };
+            rows.push(DirRow {
+                kind: e.kind,
+                path: e.path.clone(),
+                display: format!("{leaf}{} {}{marker}", dir_entry_icon(e), entry_name(e),),
+            });
+            if is_current && let Ok(children) = read_renderable_entries(cur) {
+                let down_col = if is_last { "    " } else { "│   " };
+                let clast = children.len().saturating_sub(1);
+                for (j, c) in children.iter().enumerate() {
+                    let cleaf = if j == clast {
+                        "└── "
+                    } else {
+                        "├── "
+                    };
+                    rows.push(DirRow {
+                        kind: c.kind,
+                        path: c.path.clone(),
+                        display: format!(
+                            "{down_col}{cleaf}{} {}",
+                            dir_entry_icon(c),
+                            entry_name(c),
+                        ),
+                    });
+                }
+            }
+        }
+    } else {
+        // `cur` is the filesystem root: skip the parent layer, just
+        // show `cur` as the tree root with its children at depth 1.
+        rows.push(DirRow {
+            kind: DirEntryKind::Dir,
+            path: cur.to_path_buf(),
+            display: format!("📁 {}  ◀", cur.display()),
+        });
+        if let Ok(children) = read_renderable_entries(cur) {
+            let last = children.len().saturating_sub(1);
+            for (i, c) in children.iter().enumerate() {
+                let leaf = if i == last {
+                    "└── "
+                } else {
+                    "├── "
+                };
+                rows.push(DirRow {
+                    kind: c.kind,
+                    path: c.path.clone(),
+                    display: format!("{leaf}{} {}", dir_entry_icon(c), entry_name(c)),
+                });
+            }
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Display name for a dir entry — appends `/` for directories so the
+/// tree row clearly distinguishes folder rows from files.
+fn entry_name(e: &DirEntry) -> String {
+    match e.kind {
+        DirEntryKind::Dir => format!("{}/", e.name),
+        DirEntryKind::File | DirEntryKind::Parent => e.name.clone(),
+    }
+}
+
+/// Pick a leading glyph for a directory-browser row. Emoji (width 2) is
+/// rendered as-is by ratatui; works on any terminal with reasonable
+/// emoji coverage without a Nerd Font dependency.
+fn dir_entry_icon(entry: &DirEntry) -> &'static str {
+    match entry.kind {
+        DirEntryKind::Parent | DirEntryKind::Dir => "📁",
+        DirEntryKind::File => {
+            let ext = entry
+                .path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            match ext.as_deref() {
+                Some("md" | "markdown") => "📝",
+                _ => "📄",
+            }
+        }
+    }
+}
+
+/// Heuristic: which local files can we open without showing garbage?
+/// Stricter than the URL variant (which accepts any extensionless path)
+/// because the filesystem hands us executables and other binaries that
+/// happen to lack an extension.
+fn is_renderable_local_file(p: &Path) -> bool {
+    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+        let lower = ext.to_ascii_lowercase();
+        return matches!(lower.as_str(), "md" | "markdown" | "txt" | "text");
+    }
+    p.file_name()
+        .and_then(|s| s.to_str())
+        .map(|n| n.eq_ignore_ascii_case("license") || n.eq_ignore_ascii_case("readme"))
+        .unwrap_or(false)
 }
 
 /// Build one tree-style prefix per anchor (`├── ` / `└── ` with `│   `
