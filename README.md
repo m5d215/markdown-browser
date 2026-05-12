@@ -18,12 +18,6 @@ Status: early development.
 - **In-app help** — `?` shows the full keybinding list
 - **Plain-text render subcommand** — `markdown-browser render <file>` writes ANSI-styled output to stdout, suitable for piping or snapshot testing
 
-### Roadmap
-
-- Yank code block to clipboard
-- Customizable keybindings
-- Directory browser
-
 ### Out of scope (kept extensible)
 
 - Image rendering (Sixel / Kitty / iTerm2 inline)
