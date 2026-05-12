@@ -81,6 +81,11 @@ impl Style {
         self
     }
 
+    pub const fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
+    }
+
     pub const fn bold(mut self) -> Self {
         self.bold = true;
         self

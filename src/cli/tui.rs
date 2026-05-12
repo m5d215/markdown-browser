@@ -45,6 +45,16 @@ enum Mode {
     Normal,
     Toc,
     Help,
+    Search,
+}
+
+#[derive(Debug, Clone)]
+struct MatchPos {
+    /// Logical line index in `App.lines`.
+    line: usize,
+    /// Character offset within the line's joined plain text, half-open.
+    char_start: usize,
+    char_end: usize,
 }
 
 /// Hard-coded keybinding catalogue used by the help overlay. Lives in code
@@ -54,6 +64,8 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("q / Esc / Ctrl-C", "終了"),
     ("?", "このヘルプを開閉"),
     ("o", "目次オーバーレイ"),
+    ("/", "検索を開始 (Enter で確定 / Esc で取り消し)"),
+    ("n / N", "次 / 前のマッチへ"),
     ("Tab / Shift-Tab", "リンクをフォーカス移動"),
     ("Enter", "フォーカス中のリンクを開く"),
     ("[ / ]", "履歴 Back / Forward"),
@@ -97,6 +109,15 @@ struct App {
     /// currently displayed entry; anything past it is forward history.
     history: Vec<Location>,
     history_cursor: usize,
+    /// Active search query (empty == none).
+    search_query: String,
+    /// Live edit buffer while the user is typing into the search prompt.
+    /// `None` when no search input is in progress.
+    search_input: Option<String>,
+    /// All hits for `search_query`, ordered by document position.
+    search_matches: Vec<MatchPos>,
+    /// Index into `search_matches` for the "current" hit, if any.
+    search_cursor: Option<usize>,
 }
 
 impl App {
@@ -120,6 +141,10 @@ impl App {
             status_message: None,
             history: vec![initial],
             history_cursor: 0,
+            search_query: String::new(),
+            search_input: None,
+            search_matches: Vec::new(),
+            search_cursor: None,
         }
     }
 
@@ -148,6 +173,35 @@ impl App {
                 self.handle_key_help(code, mods);
                 false
             }
+            Mode::Search => {
+                self.handle_key_search(code, mods);
+                false
+            }
+        }
+    }
+
+    fn handle_key_search(&mut self, code: KeyCode, _mods: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.search_input = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let q = self.search_input.take().unwrap_or_default();
+                self.mode = Mode::Normal;
+                self.commit_search(q);
+            }
+            KeyCode::Backspace => {
+                if let Some(s) = self.search_input.as_mut() {
+                    s.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(s) = self.search_input.as_mut() {
+                    s.push(c);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -168,6 +222,12 @@ impl App {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Char('o'), _) => self.open_toc(),
             (KeyCode::Char('?'), _) => self.mode = Mode::Help,
+            (KeyCode::Char('/'), _) => {
+                self.mode = Mode::Search;
+                self.search_input = Some(String::new());
+            }
+            (KeyCode::Char('n'), _) => self.search_step(1),
+            (KeyCode::Char('N'), _) => self.search_step(-1),
             (KeyCode::Tab, _) => self.focus_next_link(1),
             (KeyCode::BackTab, _) => self.focus_next_link(-1),
             (KeyCode::Enter, _) => self.activate_focused_link(),
@@ -222,6 +282,75 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn commit_search(&mut self, query: String) {
+        self.search_query = query.clone();
+        self.search_matches.clear();
+        self.search_cursor = None;
+        if query.is_empty() {
+            return;
+        }
+        let needle = query.to_lowercase();
+        for (line_idx, line) in self.lines.iter().enumerate() {
+            let plain: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+            let plain_lower = plain.to_lowercase();
+            let mut from = 0;
+            while let Some(pos) = plain_lower[from..].find(&needle) {
+                let byte_start = from + pos;
+                let byte_end = byte_start + needle.len();
+                let char_start = plain_lower[..byte_start].chars().count();
+                let char_end = plain_lower[..byte_end].chars().count();
+                self.search_matches.push(MatchPos {
+                    line: line_idx,
+                    char_start,
+                    char_end,
+                });
+                from = byte_end;
+                if from >= plain_lower.len() {
+                    break;
+                }
+            }
+        }
+        if self.search_matches.is_empty() {
+            self.status_message = Some(format!("/{query}: no match"));
+            return;
+        }
+        // Pick the first match at or after the current scroll, falling back
+        // to the very first hit.
+        let start = self
+            .search_matches
+            .iter()
+            .position(|m| self.screen_row_of(m.line) >= self.scroll)
+            .unwrap_or(0);
+        self.search_cursor = Some(start);
+        self.scroll_to_match(start);
+    }
+
+    fn search_step(&mut self, dir: isize) {
+        if self.search_matches.is_empty() {
+            if !self.search_query.is_empty() {
+                self.status_message = Some(format!("/{}: no match", self.search_query));
+            }
+            return;
+        }
+        let n = self.search_matches.len() as isize;
+        let cur = self.search_cursor.unwrap_or(0) as isize + dir;
+        let next = ((cur % n + n) % n) as usize;
+        self.search_cursor = Some(next);
+        self.scroll_to_match(next);
+    }
+
+    fn scroll_to_match(&mut self, idx: usize) {
+        let m = &self.search_matches[idx];
+        let row = self.screen_row_of(m.line);
+        let height = self.body_height as usize;
+        if row < self.scroll {
+            self.scroll = row;
+        } else if height > 0 && row >= self.scroll + height {
+            self.scroll = row.saturating_sub(height / 2);
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
     }
 
     fn focus_next_link(&mut self, dir: isize) {
@@ -401,6 +530,11 @@ impl App {
                 self.scroll = 0;
                 self.focused_link = None;
                 self.toc_selection = 0;
+                // Drop search state — matches no longer point anywhere
+                // meaningful in the new buffer.
+                self.search_query.clear();
+                self.search_matches.clear();
+                self.search_cursor = None;
                 if let Some(slug) = anchor {
                     self.jump_to_anchor(slug);
                 }
@@ -453,12 +587,26 @@ impl App {
         let total = self.total_screen_rows();
         let last_visible = (self.scroll + self.body_height as usize).min(total);
         let hint = match self.mode {
-            Mode::Normal => "?:help  o:toc  Tab:link  Enter:open  [/]:back/fwd  q:quit",
+            Mode::Normal => "?:help  /:find  o:toc  Tab:link  Enter:open  [/]:back/fwd  q:quit",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
             Mode::Help => "Esc/q/?:close",
+            Mode::Search => "Enter:confirm  Esc:cancel",
         };
-        let status_text = if let Some(msg) = &self.status_message {
-            format!(" {} ", msg)
+        let status_text = if let Some(input) = &self.search_input {
+            format!(" /{input}_  {hint} ")
+        } else if let Some(msg) = &self.status_message {
+            format!(" {msg} ")
+        } else if !self.search_query.is_empty() {
+            let count = self.search_matches.len();
+            if count == 0 {
+                format!(" /{}  (no match)  {hint} ", self.search_query)
+            } else {
+                let cur = self.search_cursor.map(|c| c + 1).unwrap_or(0);
+                format!(
+                    " /{}  [{}/{}]  n/N:next/prev  {hint} ",
+                    self.search_query, cur, count,
+                )
+            }
         } else {
             format!(
                 " {}  [{}-{}/{}]  {hint} ",
@@ -604,22 +752,121 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 impl App {
     fn convert_lines_for_display(&self) -> Vec<Line<'static>> {
-        let mut result: Vec<Line<'static>> = self.lines.iter().map(convert_line).collect();
-        if let Some(i) = self.focused_link
-            && let Some(link) = self.links.get(i)
-            && link.line < self.lines.len()
-        {
-            let mut highlighted = self.lines[link.line].clone();
-            let overlay = Style::new().reversed().bold();
-            for span_idx in link.span_range.clone() {
-                if let Some(span) = highlighted.spans.get_mut(span_idx) {
-                    span.style = span.style.merge(overlay);
+        // Group search matches by line so we only touch affected lines.
+        let mut matches_by_line: Vec<Vec<&MatchPos>> = vec![Vec::new(); self.lines.len()];
+        for m in &self.search_matches {
+            if m.line < self.lines.len() {
+                matches_by_line[m.line].push(m);
+            }
+        }
+        let current_match = self.search_cursor.and_then(|i| self.search_matches.get(i));
+        let focused_link_line = self
+            .focused_link
+            .and_then(|i| self.links.get(i))
+            .map(|l| l.line);
+
+        // Differentiate the active match from the rest: current = solid
+        // yellow on black, other = dim reverse video.
+        let search_style = Style::new().reversed();
+        let current_search_style = Style::new()
+            .bg(Color::BrightYellow)
+            .fg(Color::Black)
+            .bold();
+        let link_overlay = Style::new().reversed().bold();
+
+        let mut result: Vec<Line<'static>> = Vec::with_capacity(self.lines.len());
+        for (line_idx, line) in self.lines.iter().enumerate() {
+            let line_matches = &matches_by_line[line_idx];
+            let has_search = !line_matches.is_empty();
+            let has_focused_link = focused_link_line == Some(line_idx);
+            if !has_search && !has_focused_link {
+                result.push(convert_line(line));
+                continue;
+            }
+
+            let mut working = line.clone();
+
+            // Apply focused-link overlay first while span indices still
+            // match the original line layout.
+            if has_focused_link
+                && let Some(i) = self.focused_link
+                && let Some(link) = self.links.get(i)
+            {
+                for span_idx in link.span_range.clone() {
+                    if let Some(span) = working.spans.get_mut(span_idx) {
+                        span.style = span.style.merge(link_overlay);
+                    }
                 }
             }
-            result[link.line] = convert_line(&highlighted);
+
+            // Then apply search-match overlays by splitting spans on char
+            // boundaries. Apply matches right-to-left so earlier ranges
+            // keep their offsets valid.
+            if has_search {
+                let mut ordered: Vec<&MatchPos> = line_matches.clone();
+                ordered.sort_by_key(|m| m.char_start);
+                for m in ordered.iter().rev() {
+                    let is_current = current_match
+                        .map(|cm| cm.line == m.line && cm.char_start == m.char_start)
+                        .unwrap_or(false);
+                    let style = if is_current {
+                        current_search_style
+                    } else {
+                        search_style
+                    };
+                    apply_match_highlight(&mut working, m.char_start, m.char_end, style);
+                }
+            }
+
+            result.push(convert_line(&working));
         }
         result
     }
+}
+
+/// Split spans that intersect the char range `[start, end)` and merge
+/// `style` onto the slice inside that range.
+fn apply_match_highlight(line: &mut StyledLine, start: usize, end: usize, style: Style) {
+    if start >= end {
+        return;
+    }
+    let mut new_spans: Vec<StyledSpan> = Vec::with_capacity(line.spans.len() + 2);
+    let mut cursor = 0;
+    for span in line.spans.drain(..) {
+        let span_chars = span.text.chars().count();
+        let span_start = cursor;
+        let span_end = cursor + span_chars;
+        cursor = span_end;
+
+        if span_end <= start || span_start >= end {
+            new_spans.push(span);
+            continue;
+        }
+
+        let mut before = String::new();
+        let mut middle = String::new();
+        let mut after = String::new();
+        for (i, c) in span.text.chars().enumerate() {
+            let abs = span_start + i;
+            if abs < start {
+                before.push(c);
+            } else if abs < end {
+                middle.push(c);
+            } else {
+                after.push(c);
+            }
+        }
+        if !before.is_empty() {
+            new_spans.push(StyledSpan::new(before, span.style));
+        }
+        if !middle.is_empty() {
+            new_spans.push(StyledSpan::new(middle, span.style.merge(style)));
+        }
+        if !after.is_empty() {
+            new_spans.push(StyledSpan::new(after, span.style));
+        }
+    }
+    line.spans = new_spans;
 }
 
 #[derive(Debug, Clone)]
