@@ -90,6 +90,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("q / Esc / Ctrl-C", "終了"),
     ("?", "このヘルプを開閉"),
     ("o", "目次オーバーレイ"),
+    ("#", "行番号の表示 ON/OFF"),
     ("/", "検索を開始 (Enter で確定 / Esc で取り消し)"),
     ("n / N", "次 / 前のマッチへ"),
     ("Tab / Shift-Tab", "リンクをフォーカス移動"),
@@ -130,6 +131,8 @@ struct App {
     /// (j/k, Ctrl-d/u, g/G, ...) drive this; `scroll` follows via
     /// `scroll_to_cursor`.
     cursor_line: usize,
+    /// Whether the line-number gutter is rendered. Toggled with `#`.
+    show_line_numbers: bool,
     body_height: u16,
     body_width: u16,
     mode: Mode,
@@ -175,6 +178,7 @@ impl App {
             path,
             scroll: 0,
             cursor_line: 0,
+            show_line_numbers: true,
             body_height: 0,
             body_width: 0,
             mode: Mode::Normal,
@@ -345,6 +349,7 @@ impl App {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Char('o'), _) => self.open_toc(),
             (KeyCode::Char('?'), _) => self.mode = Mode::Help,
+            (KeyCode::Char('#'), _) => self.toggle_line_numbers(),
             (KeyCode::Char('/'), _) => {
                 self.mode = Mode::Search;
                 self.search_input = Some(String::new());
@@ -868,13 +873,36 @@ impl App {
     }
 
     fn compute_screen_rows(&self, until: usize) -> usize {
-        let body_w = (self.body_width as usize).max(1);
+        let body_w = self.text_width().max(1);
         let end = until.min(self.lines.len());
         let mut rows = 0usize;
         for line in &self.lines[..end] {
             rows += wrapped_rows(line, body_w);
         }
         rows
+    }
+
+    /// Width of the line-number gutter (including its trailing space), or
+    /// 0 when the gutter is hidden.
+    fn gutter_width(&self) -> usize {
+        if !self.show_line_numbers {
+            return 0;
+        }
+        let max = self.lines.len().max(1);
+        let digits = max.ilog10() as usize + 1;
+        digits + 1
+    }
+
+    /// Width available for body text after the gutter.
+    fn text_width(&self) -> usize {
+        (self.body_width as usize).saturating_sub(self.gutter_width())
+    }
+
+    fn toggle_line_numbers(&mut self) {
+        self.show_line_numbers = !self.show_line_numbers;
+        // Wrap geometry changed — re-pin the viewport on the cursor so we
+        // don't end up looking at the wrong region.
+        self.scroll_to_cursor();
     }
 }
 
@@ -917,13 +945,19 @@ impl App {
         // survives ratatui's wrap rendering.
         let cursor_overlay = Style::new().bg(Color::Rgb(72, 72, 92));
 
+        let show_numbers = self.show_line_numbers;
+        let gutter_w = self.gutter_width();
+        let number_pad = gutter_w.saturating_sub(1);
+        let normal_lineno = Style::new().fg(Color::BrightBlack);
+        let cursor_lineno = Style::new().fg(Color::BrightYellow).bold();
+
         let mut result: Vec<Line<'static>> = Vec::with_capacity(self.lines.len());
         for (line_idx, line) in self.lines.iter().enumerate() {
             let line_matches = &matches_by_line[line_idx];
             let has_search = !line_matches.is_empty();
             let has_focused_link = focused_link_line == Some(line_idx);
             let is_cursor = line_idx == self.cursor_line;
-            if !has_search && !has_focused_link && !is_cursor {
+            if !has_search && !has_focused_link && !is_cursor && !show_numbers {
                 result.push(convert_line(line));
                 continue;
             }
@@ -966,6 +1000,22 @@ impl App {
                 for span in &mut working.spans {
                     span.style = span.style.merge(cursor_overlay);
                 }
+            }
+
+            if show_numbers {
+                let mut gstyle = if is_cursor {
+                    cursor_lineno
+                } else {
+                    normal_lineno
+                };
+                if is_cursor {
+                    gstyle = gstyle.merge(cursor_overlay);
+                }
+                let text = format!("{:>width$} ", line_idx + 1, width = number_pad);
+                working.spans.insert(0, StyledSpan::new(text, gstyle));
+            }
+
+            if is_cursor {
                 let body_w = self.body_width as usize;
                 let used = spans_width(&working.spans);
                 if body_w > 0 && used < body_w {

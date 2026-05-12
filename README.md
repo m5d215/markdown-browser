@@ -13,6 +13,7 @@ Status: early development.
 - **Auto-reload on file change** — edit a file in another window, the buffer refreshes
 - **Syntax-highlighted code blocks** — via `syntect`
 - **Styled headings, lists, blockquotes, task lists** — color and structure
+- **Line cursor with line numbers** — `j`/`k` move a logical-line cursor; the gutter shows line numbers (toggle with `#`)
 - **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), and external URLs handed off to the OS
 - **History navigation** — back / forward through visited locations
 - **In-app help** — `?` shows the full keybinding list
@@ -51,6 +52,7 @@ Press `?` inside the TUI for the same list shown here.
 | `q` / `Esc` / `Ctrl-C`         | Quit                                            |
 | `?`                            | Toggle help overlay                             |
 | `o`                            | Toggle table-of-contents overlay                |
+| `#`                            | Toggle line numbers                             |
 | `/`                            | Start search (`Enter` to commit, `Esc` to cancel) |
 | `n` / `N`                      | Next / previous search hit                      |
 | `Tab` / `Shift-Tab`            | Focus next / previous link                      |
