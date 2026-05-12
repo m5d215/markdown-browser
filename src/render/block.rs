@@ -20,20 +20,25 @@ pub struct RenderContext<'r> {
 
 pub fn render_document<'a>(root: &'a AstNode<'a>, ctx: &RenderContext<'_>) -> RenderOutput {
     let mut out = RenderOutput::default();
-    render_blocks(root, ctx, "", &mut out);
+    render_blocks(root, ctx, "", true, &mut out);
     trim_trailing_blank(&mut out.lines);
     out
 }
 
+/// Walk every direct child block of `parent`, emitting them in order. When
+/// `separate` is true a blank line is inserted between adjacent blocks
+/// (the usual document layout). Tight-list item interiors pass `false` to
+/// keep their inner paragraphs / nested lists compact, matching CommonMark.
 fn render_blocks<'a>(
     parent: &'a AstNode<'a>,
     ctx: &RenderContext<'_>,
     indent: &str,
+    separate: bool,
     out: &mut RenderOutput,
 ) {
     let mut first = true;
     for child in parent.children() {
-        if !first {
+        if !first && separate {
             out.lines.push(StyledLine::new());
         }
         first = false;
@@ -51,7 +56,7 @@ fn render_block<'a>(
     match &data.value {
         NodeValue::Document => {
             drop(data);
-            render_blocks(node, ctx, indent, out);
+            render_blocks(node, ctx, indent, true, out);
         }
 
         NodeValue::Heading(h) => {
@@ -89,7 +94,7 @@ fn render_block<'a>(
         NodeValue::BlockQuote => {
             drop(data);
             let mut inner = RenderOutput::default();
-            render_blocks(node, ctx, "", &mut inner);
+            render_blocks(node, ctx, "", true, &mut inner);
             let base_line = out.lines.len();
             out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
                 a.line += base_line;
@@ -132,21 +137,39 @@ fn render_block<'a>(
                 if idx > 0 && !tight {
                     out.lines.push(StyledLine::new());
                 }
-                let marker = match list_type {
-                    ListType::Bullet => "• ".to_string(),
-                    ListType::Ordered => {
-                        let s = format!("{counter}. ");
-                        counter += 1;
-                        s
-                    }
+                // Check whether this child is a GFM task item so we can
+                // emit the right marker. comrak places TaskItem nodes
+                // directly under List, replacing Item in the AST.
+                let task = match &item.data.borrow().value {
+                    NodeValue::TaskItem(t) => Some(*t),
+                    _ => None,
                 };
-                render_list_item(item, ctx, indent, &marker, out);
+                if let Some(t) = task {
+                    let done = t.symbol.is_some();
+                    let marker = if done { "[x] " } else { "[ ] " };
+                    let style = if done {
+                        ctx.theme.task_marker_done
+                    } else {
+                        ctx.theme.task_marker_todo
+                    };
+                    render_task_item(item, ctx, indent, marker, style, tight, out);
+                } else {
+                    let marker = match list_type {
+                        ListType::Bullet => "• ".to_string(),
+                        ListType::Ordered => {
+                            let s = format!("{counter}. ");
+                            counter += 1;
+                            s
+                        }
+                    };
+                    render_list_item(item, ctx, indent, &marker, tight, out);
+                }
             }
         }
 
         NodeValue::Item(_) => {
             drop(data);
-            render_blocks(node, ctx, indent, out);
+            render_blocks(node, ctx, indent, true, out);
         }
 
         NodeValue::TaskItem(task) => {
@@ -158,7 +181,8 @@ fn render_block<'a>(
             } else {
                 ctx.theme.task_marker_todo
             };
-            render_task_item(node, ctx, indent, marker, marker_style, out);
+            // Stray TaskItem outside a List — default to tight layout.
+            render_task_item(node, ctx, indent, marker, marker_style, true, out);
         }
 
         NodeValue::CodeBlock(code) => {
@@ -236,7 +260,7 @@ fn render_block<'a>(
         // Anything else (footnotes, etc.) — recurse so content isn't dropped.
         _ => {
             drop(data);
-            render_blocks(node, ctx, indent, out);
+            render_blocks(node, ctx, indent, true, out);
         }
     }
 }
@@ -246,12 +270,13 @@ fn render_list_item<'a>(
     ctx: &RenderContext<'_>,
     indent: &str,
     marker: &str,
+    tight: bool,
     out: &mut RenderOutput,
 ) {
     let marker_width = display_width(marker);
 
     let mut inner = RenderOutput::default();
-    render_blocks(item, ctx, "", &mut inner);
+    render_blocks(item, ctx, "", !tight, &mut inner);
 
     let base_line = out.lines.len();
     out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
@@ -284,12 +309,13 @@ fn render_task_item<'a>(
     indent: &str,
     marker: &str,
     marker_style: Style,
+    tight: bool,
     out: &mut RenderOutput,
 ) {
     let marker_width = display_width(marker);
 
     let mut inner = RenderOutput::default();
-    render_blocks(item, ctx, "", &mut inner);
+    render_blocks(item, ctx, "", !tight, &mut inner);
 
     let base_line = out.lines.len();
     out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
