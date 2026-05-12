@@ -12,6 +12,7 @@ Status: early development.
 - **Incremental search** — `/` to type, `n` / `N` to step through hits
 - **Auto-reload on file change** — edit a file in another window, the buffer refreshes
 - **Syntax-highlighted code blocks** — via `syntect`
+- **Front matter panel** — YAML (`---`) and TOML (`+++`) front matter is rendered as a framed metadata block at the top of the document
 - **Styled headings, lists, blockquotes, task lists** — color and structure
 - **Line cursor with line numbers** — `j`/`k` move a logical-line cursor; the gutter shows line numbers (toggle with `#`)
 - **Yank with expand/shrink** — `y` enters yank mode and grows the selection (line → paragraph → list item / blockquote → heading section → whole document); `Y` shrinks; `Enter` copies to the OS clipboard
