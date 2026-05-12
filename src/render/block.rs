@@ -59,6 +59,14 @@ fn render_block<'a>(
             render_blocks(node, ctx, indent, true, out);
         }
 
+        NodeValue::FrontMatter(literal) => {
+            let literal = literal.clone();
+            drop(data);
+            let start = out.lines.len();
+            render_front_matter(&literal, indent, ctx.theme, out);
+            push_block(out, start, BlockKind::Leaf);
+        }
+
         NodeValue::Heading(h) => {
             let level = h.level;
             drop(data);
@@ -469,4 +477,75 @@ fn walk_plain<'a>(node: &'a AstNode<'a>, out: &mut String) {
             }
         }
     }
+}
+
+/// Render a YAML / TOML front matter block as a styled panel. `literal`
+/// is the raw text comrak hands us, which includes the opening and
+/// closing delimiter lines.
+fn render_front_matter(literal: &str, indent: &str, theme: &Theme, out: &mut RenderOutput) {
+    let trimmed = literal.trim_end_matches('\n');
+    let mut iter = trimmed.lines();
+    let first = iter.next().unwrap_or("").trim();
+    let format_label = if first == "+++" { "TOML" } else { "YAML" };
+
+    let mut content: Vec<&str> = iter.collect();
+    if let Some(last) = content.last()
+        && matches!(last.trim(), "---" | "+++")
+    {
+        content.pop();
+    }
+
+    let mut top = StyledLine::new();
+    if !indent.is_empty() {
+        top.push_plain(indent.to_string());
+    }
+    top.push_styled(
+        format!("┌─ Front matter ({format_label}) "),
+        theme.front_matter_border,
+    );
+    top.push_styled("─".repeat(20), theme.front_matter_border);
+    out.lines.push(top);
+
+    for line in &content {
+        let mut row = StyledLine::new();
+        if !indent.is_empty() {
+            row.push_plain(indent.to_string());
+        }
+        row.push_styled("│ ", theme.front_matter_border);
+        if let Some((key, sep, value)) = split_front_matter_kv(line) {
+            row.push_styled(key.to_string(), theme.front_matter_key);
+            row.push_styled(sep.to_string(), theme.front_matter_separator);
+            if !value.is_empty() {
+                row.push_styled(value.to_string(), theme.front_matter_value);
+            }
+        } else {
+            row.push_styled((*line).to_string(), theme.front_matter_value);
+        }
+        out.lines.push(row);
+    }
+
+    let mut bot = StyledLine::new();
+    if !indent.is_empty() {
+        bot.push_plain(indent.to_string());
+    }
+    bot.push_styled("└".to_string(), theme.front_matter_border);
+    bot.push_styled("─".repeat(40), theme.front_matter_border);
+    out.lines.push(bot);
+}
+
+/// Heuristic key/value splitter for front matter rows. Recognizes TOML
+/// (`key = value`) and YAML (`key: value` / bare `key:`) shapes; nested
+/// content keeps its leading whitespace as part of the key so indentation
+/// survives.
+fn split_front_matter_kv(line: &str) -> Option<(&str, &str, &str)> {
+    if let Some(idx) = line.find(" = ") {
+        return Some((&line[..idx], " = ", &line[idx + 3..]));
+    }
+    if let Some(idx) = line.find(": ") {
+        return Some((&line[..idx], ": ", &line[idx + 2..]));
+    }
+    if let Some(stripped) = line.strip_suffix(':') {
+        return Some((stripped, ":", ""));
+    }
+    None
 }

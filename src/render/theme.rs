@@ -24,6 +24,10 @@ pub struct Theme {
     pub strikethrough: Style,
     pub thematic_break: Style,
     pub image_alt: Style,
+    pub front_matter_border: Style,
+    pub front_matter_key: Style,
+    pub front_matter_value: Style,
+    pub front_matter_separator: Style,
 }
 
 impl Theme {
@@ -53,6 +57,10 @@ impl Theme {
             strikethrough: Style::new().strikethrough().dim(),
             thematic_break: Style::new().fg(Color::BrightBlack),
             image_alt: Style::new().fg(Color::Magenta),
+            front_matter_border: Style::new().fg(Color::BrightBlack),
+            front_matter_key: Style::new().fg(Color::BrightCyan).bold(),
+            front_matter_separator: Style::new().fg(Color::BrightBlack),
+            front_matter_value: Style::new().fg(Color::BrightWhite),
         }
     }
 
