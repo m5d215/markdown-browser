@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub mod ansi;
 pub mod render;
 pub mod tui;
 
@@ -21,12 +22,24 @@ pub enum Command {
     Render {
         /// Markdown file to render. Use "-" or omit to read from stdin.
         file: Option<PathBuf>,
+
+        /// Force ANSI color output even when stdout is not a TTY.
+        #[arg(long)]
+        color: bool,
+
+        /// Disable ANSI color output even when stdout is a TTY.
+        #[arg(long, conflicts_with = "color")]
+        no_color: bool,
     },
 }
 
 pub fn run(cli: Cli) -> std::io::Result<()> {
     match cli.command {
-        Some(Command::Render { file }) => render::run(file.as_deref()),
+        Some(Command::Render {
+            file,
+            color,
+            no_color,
+        }) => render::run(file.as_deref(), render::ColorChoice::resolve(color, no_color)),
         None => tui::run(cli.file.as_deref()),
     }
 }
