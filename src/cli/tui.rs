@@ -14,28 +14,31 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 
+use crate::cli::net;
+use crate::cli::source::{self, Source};
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
 use crate::render::{self, Anchor, BlockKind, BlockRange, Link, RenderOutput};
 
-pub fn run(file: Option<&Path>) -> io::Result<()> {
-    let path = match file {
-        Some(p) if p.as_os_str() != "-" => p.to_path_buf(),
+pub fn run(arg: Option<&Path>) -> io::Result<()> {
+    let arg = match arg {
+        Some(p) if p.as_os_str() != "-" => p,
         Some(_) | None => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "TUI mode requires a file path. Use `markdown-browser render` for stdin input.",
+                "TUI mode requires a file path or URL. Use `markdown-browser render` for stdin input.",
             ));
         }
     };
+    let source = Source::from_arg(&arg.to_string_lossy());
 
-    let input = std::fs::read_to_string(&path)?;
+    let input = read_source(&source).map_err(io::Error::other)?;
     let doc = parse_and_render(&input);
-    let title = path.display().to_string();
+    let title = source.display();
 
     // Start a filesystem watcher that pings the main loop whenever the
     // currently-active file changes. Failure to create one isn't fatal —
-    // auto-reload just becomes unavailable.
+    // auto-reload just becomes unavailable. URLs never watch.
     let (tx, rx) = mpsc::channel::<()>();
     let watcher_tx = tx;
     let watcher: Option<RecommendedWatcher> =
@@ -52,12 +55,19 @@ pub fn run(file: Option<&Path>) -> io::Result<()> {
         .ok();
 
     ratatui::run(move |terminal| {
-        let mut app = App::new(doc, title, path);
+        let mut app = App::new(doc, title, source);
         if let Some(w) = watcher {
             app.attach_watcher(w, rx);
         }
         app.run(terminal)
     })
+}
+
+fn read_source(source: &Source) -> Result<String, String> {
+    match source {
+        Source::File(p) => std::fs::read_to_string(p).map_err(|e| e.to_string()),
+        Source::Url(u) => net::fetch(u),
+    }
 }
 
 fn parse_and_render(input: &str) -> RenderOutput {
@@ -129,7 +139,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
 
 #[derive(Debug, Clone)]
 struct Location {
-    path: PathBuf,
+    source: Source,
     /// Logical line the cursor was on when leaving this entry.
     cursor: usize,
     /// Screen-row scroll offset (post-wrap), so the visible region is
@@ -143,7 +153,7 @@ struct App {
     links: Vec<Link>,
     blocks: Vec<BlockRange>,
     title: String,
-    path: PathBuf,
+    source: Source,
     /// Scroll offset measured in **screen rows** (after wrap), matching what
     /// `Paragraph::scroll` consumes. Heading jumps and lookups convert
     /// logical line indices through `screen_row_of`.
@@ -187,9 +197,9 @@ struct App {
 }
 
 impl App {
-    fn new(doc: RenderOutput, title: String, path: PathBuf) -> Self {
+    fn new(doc: RenderOutput, title: String, source: Source) -> Self {
         let initial = Location {
-            path: path.clone(),
+            source: source.clone(),
             cursor: 0,
             scroll: 0,
         };
@@ -199,7 +209,7 @@ impl App {
             links: doc.links,
             blocks: doc.blocks,
             title,
-            path,
+            source,
             scroll: 0,
             cursor_line: 0,
             show_line_numbers: true,
@@ -228,8 +238,9 @@ impl App {
         self.refresh_watch();
     }
 
-    /// Re-target the filesystem watcher at `self.path`, replacing any prior
-    /// watch. No-op when no watcher is attached.
+    /// Re-target the filesystem watcher at `self.source`, replacing any
+    /// prior watch. No-op when no watcher is attached, or when the active
+    /// source is a URL (nothing on the local filesystem to watch).
     fn refresh_watch(&mut self) {
         let Some(w) = self.watcher.as_mut() else {
             return;
@@ -237,21 +248,27 @@ impl App {
         if let Some(old) = self.watched_path.take() {
             let _ = w.unwatch(&old);
         }
-        match w.watch(&self.path, RecursiveMode::NonRecursive) {
+        let Some(path) = self.source.as_file() else {
+            return;
+        };
+        match w.watch(path, RecursiveMode::NonRecursive) {
             Ok(()) => {
-                self.watched_path = Some(self.path.clone());
+                self.watched_path = Some(path.to_path_buf());
             }
             Err(e) => {
-                self.status_message = Some(format!("watch {}: {e}", self.path.display()));
+                self.status_message = Some(format!("watch {}: {e}", path.display()));
             }
         }
     }
 
     /// Re-read the currently-displayed file and refresh the buffer, keeping
     /// scroll position and re-running any active search. Invoked from the
-    /// event loop when the filesystem watcher pings.
+    /// event loop when the filesystem watcher pings. Only Files are
+    /// watched, so URL sources never trigger a reload here.
     fn reload_in_place(&mut self) {
-        let path = self.path.clone();
+        let Some(path) = self.source.as_file().map(Path::to_path_buf) else {
+            return;
+        };
         let saved_scroll = self.scroll;
         let saved_cursor = self.cursor_line;
         match std::fs::read_to_string(&path) {
@@ -562,12 +579,7 @@ impl App {
             return;
         };
         let url = self.links[i].url.clone();
-        let parent = self
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let target = classify_link(&url, &parent);
+        let target = classify_link(&url, &self.source);
         self.execute_link(target);
     }
 
@@ -581,10 +593,16 @@ impl App {
                 self.navigate_within(&slug);
             }
             LinkTarget::LocalFile(path) => {
-                self.navigate(&path, None);
+                self.navigate(&Source::File(path), None);
             }
             LinkTarget::LocalAnchor(path, slug) => {
-                self.navigate(&path, Some(&slug));
+                self.navigate(&Source::File(path), Some(&slug));
+            }
+            LinkTarget::RemoteFile(url) => {
+                self.navigate(&Source::Url(url), None);
+            }
+            LinkTarget::RemoteAnchor(url, slug) => {
+                self.navigate(&Source::Url(url), Some(&slug));
             }
         }
     }
@@ -602,7 +620,7 @@ impl App {
         self.scroll = self.screen_row_of(target).min(self.max_scroll());
         self.history.truncate(self.history_cursor + 1);
         self.history.push(Location {
-            path: self.path.clone(),
+            source: self.source.clone(),
             cursor: self.cursor_line,
             scroll: self.scroll,
         });
@@ -630,20 +648,20 @@ impl App {
 
     /// Open a different document and record it as a new entry on the
     /// history stack. Forward history past the cursor is discarded.
-    fn navigate(&mut self, path: &Path, anchor: Option<&str>) {
+    fn navigate(&mut self, source: &Source, anchor: Option<&str>) {
         // Save where we were leaving from.
         if let Some(loc) = self.history.get_mut(self.history_cursor) {
             loc.cursor = self.cursor_line;
             loc.scroll = self.scroll;
         }
 
-        if !self.load_document(path, anchor) {
+        if !self.load_document(source, anchor) {
             return;
         }
 
         self.history.truncate(self.history_cursor + 1);
         self.history.push(Location {
-            path: path.to_path_buf(),
+            source: source.clone(),
             cursor: self.cursor_line,
             scroll: self.scroll,
         });
@@ -673,7 +691,7 @@ impl App {
         let target_loc = self.history[target].clone();
         let leaving_scroll = self.scroll;
         let leaving_cursor = self.cursor_line;
-        if !self.load_document(&target_loc.path, None) {
+        if !self.load_document(&target_loc.source, None) {
             return;
         }
         self.history[self.history_cursor].scroll = leaving_scroll;
@@ -683,18 +701,21 @@ impl App {
         self.scroll = target_loc.scroll.min(self.max_scroll());
     }
 
-    /// Read and re-render `path`. Returns false on error (the buffer is
+    /// Read and re-render `source`. Returns false on error (the buffer is
     /// left unchanged in that case); the status bar carries the reason.
-    fn load_document(&mut self, path: &Path, anchor: Option<&str>) -> bool {
-        match std::fs::read_to_string(path) {
+    fn load_document(&mut self, source: &Source, anchor: Option<&str>) -> bool {
+        if let Source::Url(u) = source {
+            self.status_message = Some(format!("fetching {u}…"));
+        }
+        match read_source(source) {
             Ok(input) => {
                 let doc = parse_and_render(&input);
                 self.lines = doc.lines;
                 self.anchors = doc.anchors;
                 self.links = doc.links;
                 self.blocks = doc.blocks;
-                self.title = path.display().to_string();
-                self.path = path.to_path_buf();
+                self.title = source.display();
+                self.source = source.clone();
                 self.scroll = 0;
                 self.cursor_line = 0;
                 self.focused_link = None;
@@ -709,10 +730,11 @@ impl App {
                     self.jump_to_anchor(slug);
                 }
                 self.refresh_watch();
+                self.status_message = None;
                 true
             }
             Err(e) => {
-                self.status_message = Some(format!("open {}: {e}", path.display()));
+                self.status_message = Some(format!("open {}: {e}", source.display()));
                 false
             }
         }
@@ -1323,23 +1345,70 @@ fn apply_match_highlight(line: &mut StyledLine, start: usize, end: usize, style:
 
 #[derive(Debug, Clone)]
 enum LinkTarget {
+    /// Hand off to the OS — non-markdown URLs, mailto/tel, etc.
     Url(String),
+    /// `#slug` within the current document.
     SameAnchor(String),
+    /// Local markdown file on disk.
     LocalFile(PathBuf),
+    /// Local file with a heading anchor.
     LocalAnchor(PathBuf, String),
+    /// Remote markdown file we can fetch and render in-app.
+    RemoteFile(String),
+    /// Remote markdown file with a heading anchor.
+    RemoteAnchor(String, String),
 }
 
-fn classify_link(url: &str, current_dir: &Path) -> LinkTarget {
-    if url.contains("://") || url.starts_with("mailto:") || url.starts_with("tel:") {
-        return LinkTarget::Url(url.to_string());
-    }
-    if let Some(slug) = url.strip_prefix('#') {
+fn classify_link(link: &str, current: &Source) -> LinkTarget {
+    // Same-document anchor — always handled internally.
+    if let Some(slug) = link.strip_prefix('#') {
         return LinkTarget::SameAnchor(slug.to_string());
     }
-    if let Some((path, anchor)) = url.split_once('#') {
-        return LinkTarget::LocalAnchor(current_dir.join(path), anchor.to_string());
+
+    // mailto / tel — straight to the OS, ignoring the current source.
+    if link.starts_with("mailto:") || link.starts_with("tel:") {
+        return LinkTarget::Url(link.to_string());
     }
-    LinkTarget::LocalFile(current_dir.join(url))
+
+    // Try to resolve the link as a URL, either absolute or relative to
+    // the current URL source.
+    let resolved = if source::is_url(link) {
+        url::Url::parse(link).ok()
+    } else if let Source::Url(base) = current {
+        url::Url::parse(base).and_then(|b| b.join(link)).ok()
+    } else {
+        None
+    };
+
+    if let Some(u) = resolved {
+        return classify_resolved_url(u);
+    }
+
+    // Plain local path (only meaningful when current source is a File).
+    let parent = match current {
+        Source::File(p) => p
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        Source::Url(_) => PathBuf::from("."),
+    };
+    if let Some((path, anchor)) = link.split_once('#') {
+        return LinkTarget::LocalAnchor(parent.join(path), anchor.to_string());
+    }
+    LinkTarget::LocalFile(parent.join(link))
+}
+
+fn classify_resolved_url(mut u: url::Url) -> LinkTarget {
+    if !source::url_path_is_renderable(&u) {
+        return LinkTarget::Url(u.to_string());
+    }
+    let fragment = u.fragment().map(str::to_string);
+    u.set_fragment(None);
+    let s = u.to_string();
+    match fragment {
+        Some(slug) => LinkTarget::RemoteAnchor(s, slug),
+        None => LinkTarget::RemoteFile(s),
+    }
 }
 
 fn convert_line(line: &StyledLine) -> Line<'static> {
