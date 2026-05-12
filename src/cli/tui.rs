@@ -131,6 +131,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Ctrl-b / PgUp", "1 画面カーソル移動 (上)"),
     ("g / Home", "カーソルを先頭へ"),
     ("G / End", "カーソルを末尾へ"),
+    ("} / {", "次 / 前のセクション (見出し) へ"),
     ("y", "Yank 開始 / 選択を拡張"),
     ("Y (Shift-y)", "Yank の選択を縮小"),
     ("Enter (Yank 中)", "選択範囲をクリップボードへコピー"),
@@ -425,6 +426,8 @@ impl App {
             }
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
             (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.cursor_to(self.last_line_index()),
+            (KeyCode::Char('}'), _) => self.cursor_to_next_section(),
+            (KeyCode::Char('{'), _) => self.cursor_to_prev_section(),
             (KeyCode::Char('y'), _) => self.enter_yank(),
             _ => {}
         }
@@ -906,6 +909,28 @@ impl App {
     fn cursor_to(&mut self, line: usize) {
         self.cursor_line = line.min(self.last_line_index());
         self.scroll_to_cursor();
+    }
+
+    /// Jump the cursor to the next heading line. Anchors are kept in
+    /// document order during rendering, so a linear scan is fine. No-op
+    /// when the document has no headings or the cursor is already at or
+    /// past the last one.
+    fn cursor_to_next_section(&mut self) {
+        if let Some(a) = self.anchors.iter().find(|a| a.line > self.cursor_line) {
+            self.cursor_to(a.line);
+        }
+    }
+
+    /// Jump the cursor to the previous heading line.
+    fn cursor_to_prev_section(&mut self) {
+        if let Some(a) = self
+            .anchors
+            .iter()
+            .rev()
+            .find(|a| a.line < self.cursor_line)
+        {
+            self.cursor_to(a.line);
+        }
     }
 
     /// Adjust `scroll` so the cursor line is visible. No-op if it already
