@@ -8,7 +8,8 @@ Status: early development.
 
 - **TUI-first navigation** — a full-screen interactive browser, not just a one-shot pretty printer
 - **GFM table rendering** — proper column widths with East Asian Width and ANSI-aware sizing
-- **Table of contents overlay** — heading outline accessible from any view
+- **Table of contents overlay** — heading outline accessible from any view, drawn with tree-style box-drawing prefixes
+- **Directory browser overlay** — `d` opens the current file's parent directory; pick a sibling markdown file or descend into a subdir without leaving the TUI
 - **Incremental search** — `/` to type, `n` / `N` to step through hits
 - **Auto-reload on file change** — edit a file in another window, the buffer refreshes
 - **Syntax-highlighted code blocks** — via `syntect`
@@ -59,6 +60,7 @@ Press `?` inside the TUI for the same list shown here.
 | `q` / `Esc` / `Ctrl-C`         | Quit                                            |
 | `?`                            | Toggle help overlay                             |
 | `o`                            | Toggle table-of-contents overlay                |
+| `d`                            | Toggle directory browser overlay                |
 | `#`                            | Toggle line numbers                             |
 | `e`                            | Toggle `:emoji:` shortcode expansion            |
 | `/`                            | Start search (`Enter` to commit, `Esc` to cancel) |
