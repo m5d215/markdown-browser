@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Run tests
+        run: cargo test --release --locked
+
+      - name: Package (tar.gz)
+        shell: bash
+        run: |
+          staging="markdown-browser-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp target/release/markdown-browser "$staging/"
+          cp LICENSE-MIT README.md "$staging/"
+          tar czf "${staging}.tar.gz" -C "$staging" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: markdown-browser-${{ matrix.target }}
+          path: markdown-browser-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "${{ github.ref_name }}" --generate-notes markdown-browser-*.tar.gz
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v6
+        with:
+          repository: m5d215/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: homebrew-tap
+
+      - name: Bump formula
+        working-directory: homebrew-tap
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          formula="Formula/markdown-browser.rb"
+
+          sed -i -E "s|version \"[^\"]+\"|version \"${version}\"|" "$formula"
+
+          # Update each platform's url + immediately-following sha256 line
+          # together. `sed N` pulls the next line into the pattern space so
+          # the pair can be replaced atomically.
+          for target in macos-arm64 linux-x86_64; do
+            sha=$(shasum -a 256 "../markdown-browser-${target}.tar.gz" | cut -d' ' -f1)
+            sed -i -E "/-${target}\.tar\.gz\"$/{
+              N
+              s|download/v[0-9.]+/|download/${TAG}/|
+              s|sha256 \"[a-f0-9]+\"|sha256 \"${sha}\"|
+            }" "$formula"
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$formula"
+          if git diff --cached --quiet; then
+            echo "formula already at ${TAG}; skipping commit"
+            exit 0
+          fi
+          git commit -m "markdown-browser: bump to ${TAG}"
+          git push

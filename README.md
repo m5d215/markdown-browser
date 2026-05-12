@@ -32,7 +32,8 @@ The renderer architecture exposes a pluggable trait so an alternative implementa
 ## Install
 
 ```bash
-cargo install --git https://github.com/m5d215/markdown-browser
+brew install m5d215/tap/markdown-browser            # prebuilt binary (macOS / Linux)
+cargo install --git https://github.com/m5d215/markdown-browser  # build from source
 ```
 
 ## Usage
