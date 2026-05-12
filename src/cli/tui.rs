@@ -44,7 +44,29 @@ fn parse_and_render(input: &str) -> RenderOutput {
 enum Mode {
     Normal,
     Toc,
+    Help,
 }
+
+/// Hard-coded keybinding catalogue used by the help overlay. Lives in code
+/// for now; the customizable-keybindings work in Phase 2 will replace this
+/// with a data-driven binding table.
+const HELP_ROWS: &[(&str, &str)] = &[
+    ("q / Esc / Ctrl-C", "終了"),
+    ("?", "このヘルプを開閉"),
+    ("o", "目次オーバーレイ"),
+    ("Tab / Shift-Tab", "リンクをフォーカス移動"),
+    ("Enter", "フォーカス中のリンクを開く"),
+    ("[ / ]", "履歴 Back / Forward"),
+    ("Backspace", "履歴 Back (別名)"),
+    ("Alt-← / Alt-→", "履歴 Back / Forward (端末対応依存)"),
+    ("j / ↓", "1 行スクロール下"),
+    ("k / ↑", "1 行スクロール上"),
+    ("Ctrl-d / Ctrl-u", "半画面スクロール"),
+    ("Ctrl-f / PgDn", "1 画面スクロール下"),
+    ("Ctrl-b / PgUp", "1 画面スクロール上"),
+    ("g / Home", "先頭へジャンプ"),
+    ("G / End", "末尾へジャンプ"),
+];
 
 #[derive(Debug, Clone)]
 struct Location {
@@ -122,6 +144,19 @@ impl App {
                 self.handle_key_toc(code, mods);
                 false
             }
+            Mode::Help => {
+                self.handle_key_help(code, mods);
+                false
+            }
+        }
+    }
+
+    fn handle_key_help(&mut self, code: KeyCode, _mods: KeyModifiers) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.mode = Mode::Normal;
+            }
+            _ => {}
         }
     }
 
@@ -132,6 +167,7 @@ impl App {
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Char('o'), _) => self.open_toc(),
+            (KeyCode::Char('?'), _) => self.mode = Mode::Help,
             (KeyCode::Tab, _) => self.focus_next_link(1),
             (KeyCode::BackTab, _) => self.focus_next_link(-1),
             (KeyCode::Enter, _) => self.activate_focused_link(),
@@ -417,8 +453,9 @@ impl App {
         let total = self.total_screen_rows();
         let last_visible = (self.scroll + self.body_height as usize).min(total);
         let hint = match self.mode {
-            Mode::Normal => "q:quit  o:toc  Tab:link  Enter:open  [/]:back/fwd  j/k:scroll",
+            Mode::Normal => "?:help  o:toc  Tab:link  Enter:open  [/]:back/fwd  q:quit",
             Mode::Toc => "Enter:jump  Esc/q/o:close  j/k:select",
+            Mode::Help => "Esc/q/?:close",
         };
         let status_text = if let Some(msg) = &self.status_message {
             format!(" {} ", msg)
@@ -438,6 +475,43 @@ impl App {
         if self.mode == Mode::Toc && !self.anchors.is_empty() {
             self.draw_toc(frame, body_area);
         }
+        if self.mode == Mode::Help {
+            self.draw_help(frame, body_area);
+        }
+    }
+
+    fn draw_help(&self, frame: &mut ratatui::Frame<'_>, body_area: Rect) {
+        let area = centered_rect(70, 80, body_area);
+        let key_col_width = HELP_ROWS
+            .iter()
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(0);
+        let items: Vec<ListItem> = HELP_ROWS
+            .iter()
+            .map(|(k, d)| {
+                let pad = key_col_width.saturating_sub(k.chars().count());
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("{}{}", k, " ".repeat(pad)),
+                        RStyle::default()
+                            .fg(RColor::LightYellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("   "),
+                    Span::raw(d.to_string()),
+                ]);
+                ListItem::new(line)
+            })
+            .collect();
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Keybindings "),
+        );
+        frame.render_widget(Clear, area);
+        frame.render_widget(list, area);
     }
 
     fn draw_toc(&self, frame: &mut ratatui::Frame<'_>, body_area: Rect) {
