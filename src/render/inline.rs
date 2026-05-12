@@ -109,6 +109,8 @@ fn render_inline<'a>(
 
         NodeValue::HtmlInline(html) => push(out, html, base.merge(theme.code_inline)),
 
+        NodeValue::ShortCode(sc) => push(out, &sc.emoji, base),
+
         _ => {
             for child in node.children() {
                 render_inline(child, base, theme, out, links);

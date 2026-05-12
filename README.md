@@ -14,6 +14,7 @@ Status: early development.
 - **Syntax-highlighted code blocks** — via `syntect`
 - **Front matter panel** — YAML (`---`) and TOML (`+++`) front matter is rendered as a framed metadata block at the top of the document
 - **Styled headings, lists, blockquotes, task lists** — color and structure
+- **GitHub-style emoji shortcodes** — `:rocket:` renders as 🚀; toggle with `e` (or start with `--no-emoji`)
 - **Line cursor with line numbers** — `j`/`k` move a logical-line cursor; the gutter shows line numbers (toggle with `#`)
 - **Yank with expand/shrink** — `y` enters yank mode and grows the selection (line → paragraph → list item / blockquote → heading section → whole document); `Y` shrinks; `Enter` copies to the OS clipboard
 - **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), markdown URLs fetched in-app, and other URLs handed off to the OS
@@ -59,6 +60,7 @@ Press `?` inside the TUI for the same list shown here.
 | `?`                            | Toggle help overlay                             |
 | `o`                            | Toggle table-of-contents overlay                |
 | `#`                            | Toggle line numbers                             |
+| `e`                            | Toggle `:emoji:` shortcode expansion            |
 | `/`                            | Start search (`Enter` to commit, `Esc` to cancel) |
 | `n` / `N`                      | Next / previous search hit                      |
 | `Tab` / `Shift-Tab`            | Focus next / previous link                      |
