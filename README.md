@@ -69,6 +69,7 @@ Press `?` inside the TUI for the same list shown here.
 | `Ctrl-d` / `Ctrl-u`            | Half-page cursor move                           |
 | `Ctrl-f` / `Ctrl-b` (or `PgDn`/`PgUp`) | Full-page cursor move                   |
 | `g` / `G` (or `Home`/`End`)    | Jump cursor to top / bottom                     |
+| `<count>G`                     | Jump to that line number (e.g. `42G`)           |
 | `}` / `{`                      | Jump cursor to next / previous section (heading) |
 | `y`                            | Enter yank mode / expand selection              |
 | `Y` (Shift-`y`)                | Shrink yank selection                           |
