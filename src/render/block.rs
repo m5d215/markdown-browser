@@ -6,6 +6,7 @@ use comrak::nodes::{AstNode, ListType, NodeValue};
 
 use crate::render::RenderOutput;
 use crate::render::anchor::{Anchor, slugify};
+use crate::render::highlight;
 use crate::render::image::MediaRenderer;
 use crate::render::inline;
 use crate::render::style::{Style, StyledLine, StyledSpan};
@@ -176,17 +177,18 @@ fn render_block<'a>(
             }
             top.push_styled(fence_text, ctx.theme.code_fence);
             out.lines.push(top);
-            for raw_line in literal.split('\n') {
-                if raw_line.is_empty() && literal.ends_with('\n') {
-                    continue;
-                }
-                let mut line = StyledLine::new();
+
+            let lang = info.split_whitespace().next().unwrap_or("");
+            let highlighted = highlight::highlight_code(&literal, lang);
+            for mut line in highlighted {
                 if !indent.is_empty() {
-                    line.push_plain(indent.to_string());
+                    let mut spans = vec![StyledSpan::plain(indent.to_string())];
+                    spans.append(&mut line.spans);
+                    line.spans = spans;
                 }
-                line.push_styled(raw_line.to_string(), ctx.theme.code_block);
                 out.lines.push(line);
             }
+
             let mut bottom = StyledLine::new();
             if !indent.is_empty() {
                 bottom.push_plain(indent.to_string());

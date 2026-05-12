@@ -154,4 +154,7 @@ pub enum Color {
     BrightMagenta,
     BrightCyan,
     BrightWhite,
+    /// 24-bit RGB. Sinks fall back to 256-color or the closest 16-color
+    /// approximation on terminals that don't speak truecolor.
+    Rgb(u8, u8, u8),
 }

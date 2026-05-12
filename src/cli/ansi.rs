@@ -29,93 +29,79 @@ pub fn write_lines<W: Write>(
 const RESET: &str = "\x1b[0m";
 
 fn style_prefix(style: Style) -> String {
-    let mut codes: Vec<&'static str> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     if style.bold {
-        codes.push("1");
+        parts.push("1".into());
     }
     if style.dim {
-        codes.push("2");
+        parts.push("2".into());
     }
     if style.italic {
-        codes.push("3");
+        parts.push("3".into());
     }
     if style.underline {
-        codes.push("4");
+        parts.push("4".into());
     }
     if style.reversed {
-        codes.push("7");
+        parts.push("7".into());
     }
     if style.strikethrough {
-        codes.push("9");
-    }
-
-    let mut buf = String::new();
-    buf.push_str("\x1b[");
-    let mut first = true;
-    for code in codes {
-        if !first {
-            buf.push(';');
-        }
-        first = false;
-        buf.push_str(code);
+        parts.push("9".into());
     }
     if let Some(fg) = style.fg {
-        if !first {
-            buf.push(';');
-        }
-        first = false;
-        buf.push_str(fg_code(fg));
+        parts.push(fg_code(fg));
     }
     if let Some(bg) = style.bg {
-        if !first {
-            buf.push(';');
-        }
-        first = false;
-        buf.push_str(bg_code(bg));
+        parts.push(bg_code(bg));
     }
-    let _ = first;
+
+    let mut buf = String::with_capacity(parts.iter().map(|p| p.len() + 1).sum::<usize>() + 3);
+    buf.push_str("\x1b[");
+    buf.push_str(&parts.join(";"));
     buf.push('m');
     buf
 }
 
-fn fg_code(color: Color) -> &'static str {
+fn fg_code(color: Color) -> String {
     match color {
-        Color::Black => "30",
-        Color::Red => "31",
-        Color::Green => "32",
-        Color::Yellow => "33",
-        Color::Blue => "34",
-        Color::Magenta => "35",
-        Color::Cyan => "36",
-        Color::White => "37",
-        Color::BrightBlack => "90",
-        Color::BrightRed => "91",
-        Color::BrightGreen => "92",
-        Color::BrightYellow => "93",
-        Color::BrightBlue => "94",
-        Color::BrightMagenta => "95",
-        Color::BrightCyan => "96",
-        Color::BrightWhite => "97",
+        Color::Black => "30".into(),
+        Color::Red => "31".into(),
+        Color::Green => "32".into(),
+        Color::Yellow => "33".into(),
+        Color::Blue => "34".into(),
+        Color::Magenta => "35".into(),
+        Color::Cyan => "36".into(),
+        Color::White => "37".into(),
+        Color::BrightBlack => "90".into(),
+        Color::BrightRed => "91".into(),
+        Color::BrightGreen => "92".into(),
+        Color::BrightYellow => "93".into(),
+        Color::BrightBlue => "94".into(),
+        Color::BrightMagenta => "95".into(),
+        Color::BrightCyan => "96".into(),
+        Color::BrightWhite => "97".into(),
+        Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
     }
 }
 
-fn bg_code(color: Color) -> &'static str {
+fn bg_code(color: Color) -> String {
     match color {
-        Color::Black => "40",
-        Color::Red => "41",
-        Color::Green => "42",
-        Color::Yellow => "43",
-        Color::Blue => "44",
-        Color::Magenta => "45",
-        Color::Cyan => "46",
-        Color::White => "47",
-        Color::BrightBlack => "100",
-        Color::BrightRed => "101",
-        Color::BrightGreen => "102",
-        Color::BrightYellow => "103",
-        Color::BrightBlue => "104",
-        Color::BrightMagenta => "105",
-        Color::BrightCyan => "106",
-        Color::BrightWhite => "107",
+        Color::Black => "40".into(),
+        Color::Red => "41".into(),
+        Color::Green => "42".into(),
+        Color::Yellow => "43".into(),
+        Color::Blue => "44".into(),
+        Color::Magenta => "45".into(),
+        Color::Cyan => "46".into(),
+        Color::White => "47".into(),
+        Color::BrightBlack => "100".into(),
+        Color::BrightRed => "101".into(),
+        Color::BrightGreen => "102".into(),
+        Color::BrightYellow => "103".into(),
+        Color::BrightBlue => "104".into(),
+        Color::BrightMagenta => "105".into(),
+        Color::BrightCyan => "106".into(),
+        Color::BrightWhite => "107".into(),
+        Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
     }
 }

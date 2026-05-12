@@ -9,6 +9,7 @@ use comrak::nodes::AstNode;
 
 pub mod anchor;
 pub mod block;
+pub mod highlight;
 pub mod image;
 pub mod inline;
 pub mod link;
