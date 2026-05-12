@@ -113,7 +113,9 @@ pub fn render_table<'a>(table: &'a AstNode<'a>, theme: &Theme, out: &mut Vec<Sty
 
 fn collect_cell<'a>(cell: &'a AstNode<'a>, theme: &Theme) -> Vec<StyledSpan> {
     let mut tmp: Vec<StyledLine> = vec![StyledLine::new()];
-    inline::render_inlines(cell, Style::new(), theme, &mut tmp);
+    // Links inside table cells aren't navigable in the MVP — drop them.
+    let mut discarded_links = Vec::new();
+    inline::render_inlines(cell, Style::new(), theme, &mut tmp, &mut discarded_links);
     // Flatten: tables are single-line per cell for now. Multi-line cells
     // need a wrapping pass we don't have yet.
     let mut out = Vec::new();

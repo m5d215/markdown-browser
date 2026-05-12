@@ -70,27 +70,34 @@ fn render_block<'a>(
             let marker = format!("{} ", "#".repeat(level as usize));
             let mut lines = vec![StyledLine::new()];
             lines[0].push_styled(marker, style);
-            inline::render_inlines(node, style, ctx.theme, &mut lines);
-            prepend_indent(&mut lines, indent);
-            out.lines.extend(lines);
+            let mut links = Vec::new();
+            inline::render_inlines(node, style, ctx.theme, &mut lines, &mut links);
+            prepend_indent(&mut lines, &mut links, indent);
+            merge_inline(out, lines, links);
         }
 
         NodeValue::Paragraph => {
             drop(data);
             let mut lines = Vec::new();
-            inline::render_inlines(node, ctx.theme.paragraph, ctx.theme, &mut lines);
-            prepend_indent(&mut lines, indent);
-            out.lines.extend(lines);
+            let mut links = Vec::new();
+            inline::render_inlines(node, ctx.theme.paragraph, ctx.theme, &mut lines, &mut links);
+            prepend_indent(&mut lines, &mut links, indent);
+            merge_inline(out, lines, links);
         }
 
         NodeValue::BlockQuote => {
             drop(data);
             let mut inner = RenderOutput::default();
             render_blocks(node, ctx, "", &mut inner);
+            let base_line = out.lines.len();
             out.anchors.extend(inner.anchors.into_iter().map(|mut a| {
-                a.line += out.lines.len();
+                a.line += base_line;
                 a
             }));
+            // Each line gains a leading "│ " span (and an indent span when
+            // `indent` is set), so span indices shift right by that count.
+            let span_shift = if indent.is_empty() { 1 } else { 2 };
+            shift_links(out, inner.links, base_line, span_shift);
             for mut line in inner.lines {
                 let marker = StyledSpan::new("│ ", ctx.theme.blockquote_marker);
                 if line.is_empty() {
@@ -215,7 +222,8 @@ fn render_block<'a>(
             drop(data);
             let mut lines = Vec::new();
             table::render_table(node, ctx.theme, &mut lines);
-            prepend_indent(&mut lines, indent);
+            // Tables don't expose links yet, so an empty link slice is fine.
+            prepend_indent(&mut lines, &mut [], indent);
             out.lines.extend(lines);
         }
 
@@ -248,6 +256,10 @@ fn render_list_item<'a>(
         a.line += base_line;
         a
     }));
+    // Each line is prefixed with marker/padding (always) and an indent span
+    // when `indent` is set. Shift link span ranges accordingly.
+    let span_shift = if indent.is_empty() { 1 } else { 2 };
+    shift_links(out, inner.links, base_line, span_shift);
 
     for (idx, line) in inner.lines.into_iter().enumerate() {
         let mut wrapped = StyledLine::new();
@@ -282,6 +294,8 @@ fn render_task_item<'a>(
         a.line += base_line;
         a
     }));
+    let span_shift = if indent.is_empty() { 1 } else { 2 };
+    shift_links(out, inner.links, base_line, span_shift);
 
     for (idx, line) in inner.lines.into_iter().enumerate() {
         let mut wrapped = StyledLine::new();
@@ -298,7 +312,41 @@ fn render_task_item<'a>(
     }
 }
 
-fn prepend_indent(lines: &mut [StyledLine], indent: &str) {
+fn merge_inline(
+    out: &mut RenderOutput,
+    lines: Vec<StyledLine>,
+    links: Vec<crate::render::link::Link>,
+) {
+    let base_line = out.lines.len();
+    out.lines.extend(lines);
+    out.links.extend(links.into_iter().map(|mut l| {
+        l.line += base_line;
+        l
+    }));
+}
+
+/// Re-base every link in `links` for a wrapper that prepended `span_shift`
+/// spans (e.g. indent + marker) to every line and shifted lines by
+/// `base_line` rows.
+fn shift_links(
+    out: &mut RenderOutput,
+    links: Vec<crate::render::link::Link>,
+    base_line: usize,
+    span_shift: usize,
+) {
+    out.links.extend(links.into_iter().map(|mut l| {
+        l.line += base_line;
+        l.span_range.start += span_shift;
+        l.span_range.end += span_shift;
+        l
+    }));
+}
+
+fn prepend_indent(
+    lines: &mut [StyledLine],
+    links: &mut [crate::render::link::Link],
+    indent: &str,
+) {
     if indent.is_empty() {
         return;
     }
@@ -307,6 +355,10 @@ fn prepend_indent(lines: &mut [StyledLine], indent: &str) {
         spans.push(StyledSpan::plain(indent.to_string()));
         spans.append(&mut line.spans);
         line.spans = spans;
+    }
+    for link in links.iter_mut() {
+        link.span_range.start += 1;
+        link.span_range.end += 1;
     }
 }
 

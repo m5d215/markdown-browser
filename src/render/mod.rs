@@ -11,6 +11,7 @@ pub mod anchor;
 pub mod block;
 pub mod image;
 pub mod inline;
+pub mod link;
 pub mod parse;
 pub mod style;
 pub mod table;
@@ -19,6 +20,7 @@ pub mod width;
 
 pub use anchor::Anchor;
 pub use image::{MediaRenderer, TextOnlyRenderer};
+pub use link::Link;
 pub use style::{Color, Style, StyledLine, StyledSpan};
 pub use theme::Theme;
 
@@ -26,6 +28,7 @@ pub use theme::Theme;
 pub struct RenderOutput {
     pub lines: Vec<StyledLine>,
     pub anchors: Vec<Anchor>,
+    pub links: Vec<Link>,
 }
 
 /// Render a parsed markdown document.
