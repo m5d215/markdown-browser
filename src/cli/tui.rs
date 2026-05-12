@@ -1,8 +1,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
 
 use comrak::Arena;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::DefaultTerminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
@@ -28,8 +31,29 @@ pub fn run(file: Option<&Path>) -> io::Result<()> {
     let doc = parse_and_render(&input);
     let title = path.display().to_string();
 
-    ratatui::run(|terminal| {
+    // Start a filesystem watcher that pings the main loop whenever the
+    // currently-active file changes. Failure to create one isn't fatal —
+    // auto-reload just becomes unavailable.
+    let (tx, rx) = mpsc::channel::<()>();
+    let watcher_tx = tx;
+    let watcher: Option<RecommendedWatcher> =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res
+                && matches!(
+                    ev.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                )
+            {
+                let _ = watcher_tx.send(());
+            }
+        })
+        .ok();
+
+    ratatui::run(move |terminal| {
         let mut app = App::new(doc, title, path);
+        if let Some(w) = watcher {
+            app.attach_watcher(w, rx);
+        }
         app.run(terminal)
     })
 }
@@ -118,6 +142,13 @@ struct App {
     search_matches: Vec<MatchPos>,
     /// Index into `search_matches` for the "current" hit, if any.
     search_cursor: Option<usize>,
+    /// Filesystem watcher kept alive for the lifetime of the App so its
+    /// callback continues to push events into `file_events`.
+    watcher: Option<RecommendedWatcher>,
+    /// Channel receiver fed by `watcher`.
+    file_events: Option<Receiver<()>>,
+    /// Path currently registered with the watcher.
+    watched_path: Option<PathBuf>,
 }
 
 impl App {
@@ -145,21 +176,100 @@ impl App {
             search_input: None,
             search_matches: Vec::new(),
             search_cursor: None,
+            watcher: None,
+            file_events: None,
+            watched_path: None,
+        }
+    }
+
+    fn attach_watcher(&mut self, watcher: RecommendedWatcher, rx: Receiver<()>) {
+        self.watcher = Some(watcher);
+        self.file_events = Some(rx);
+        self.refresh_watch();
+    }
+
+    /// Re-target the filesystem watcher at `self.path`, replacing any prior
+    /// watch. No-op when no watcher is attached.
+    fn refresh_watch(&mut self) {
+        let Some(w) = self.watcher.as_mut() else {
+            return;
+        };
+        if let Some(old) = self.watched_path.take() {
+            let _ = w.unwatch(&old);
+        }
+        match w.watch(&self.path, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                self.watched_path = Some(self.path.clone());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("watch {}: {e}", self.path.display()));
+            }
+        }
+    }
+
+    /// Re-read the currently-displayed file and refresh the buffer, keeping
+    /// scroll position and re-running any active search. Invoked from the
+    /// event loop when the filesystem watcher pings.
+    fn reload_in_place(&mut self) {
+        let path = self.path.clone();
+        let saved_scroll = self.scroll;
+        match std::fs::read_to_string(&path) {
+            Ok(input) => {
+                let doc = parse_and_render(&input);
+                self.lines = doc.lines;
+                self.anchors = doc.anchors;
+                self.links = doc.links;
+                self.focused_link = None;
+                self.search_matches.clear();
+                self.search_cursor = None;
+                if !self.search_query.is_empty() {
+                    let q = self.search_query.clone();
+                    self.commit_search(q);
+                }
+                let max = self.max_scroll();
+                self.scroll = saved_scroll.min(max);
+                self.status_message = Some("reloaded".into());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("reload {}: {e}", path.display()));
+            }
         }
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if self.handle_key(key.code, key.modifiers) {
-                        return Ok(());
-                    }
-                }
-                _ => {}
+
+            // Poll for input with a short timeout so we periodically wake
+            // up to drain the filesystem watcher's channel. Without the
+            // poll we'd block in event::read() and never see file events.
+            if event::poll(Duration::from_millis(150))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+                && self.handle_key(key.code, key.modifiers)
+            {
+                return Ok(());
+            }
+
+            if self.drain_file_events() {
+                self.reload_in_place();
             }
         }
+    }
+
+    /// Pull all pending file-change pings off the channel. Returns true if
+    /// at least one event arrived; multiple events from one editor save
+    /// (atomic writes often fire several) are collapsed into a single
+    /// reload.
+    fn drain_file_events(&mut self) -> bool {
+        let Some(rx) = self.file_events.as_ref() else {
+            return false;
+        };
+        let mut got = false;
+        while rx.try_recv().is_ok() {
+            got = true;
+        }
+        got
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
@@ -538,6 +648,7 @@ impl App {
                 if let Some(slug) = anchor {
                     self.jump_to_anchor(slug);
                 }
+                self.refresh_watch();
                 true
             }
             Err(e) => {
