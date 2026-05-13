@@ -1063,10 +1063,15 @@ impl App {
         let area = frame.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
             .split(area);
-        let body_area = chunks[0];
-        let status_area = chunks[1];
+        let header_area = chunks[0];
+        let body_area = chunks[1];
+        let status_area = chunks[2];
 
         self.body_height = body_area.height;
         self.body_width = body_area.width;
@@ -1075,6 +1080,8 @@ impl App {
         if self.scroll > max_scroll {
             self.scroll = max_scroll;
         }
+
+        self.draw_header(frame, header_area);
 
         let body_w = body_area.width as usize;
         let lines = self.convert_lines_for_display();
@@ -1093,42 +1100,50 @@ impl App {
             Mode::Yank => "y:expand  Y:shrink  Enter:copy  Esc:cancel",
             Mode::Dir => "Enter/l/→:open  h/←:up  j/k:select  Esc/q/d:close",
         };
+        let mode_badge = match self.mode {
+            Mode::Normal => "NORMAL",
+            Mode::Yank => "YANK",
+            Mode::Toc => "TOC",
+            Mode::Help => "HELP",
+            Mode::Search => "SEARCH",
+            Mode::Dir => "DIR",
+        };
         let status_text = if let Some(input) = &self.search_input {
-            format!(" /{input}_  {hint} ")
+            format!(" {mode_badge}  /{input}_  {hint} ")
         } else if self.mode == Mode::Yank
             && let Some(y) = &self.yank
         {
             let (start, end) = y.current();
             let n = end - start + 1;
             format!(
-                " yank  [{}/{}]  {} line{}  {hint} ",
+                " {mode_badge}  [{}/{}]  {} line{}  {hint} ",
                 y.level + 1,
                 y.path.len(),
                 n,
                 if n == 1 { "" } else { "s" },
             )
         } else if let Some(msg) = &self.status_message {
-            format!(" {msg} ")
+            format!(" {mode_badge}  {msg} ")
         } else if !self.search_query.is_empty() {
             let count = self.search_matches.len();
             if count == 0 {
-                format!(" /{}  (no match)  {hint} ", self.search_query)
+                format!(" {mode_badge}  /{}  (no match)  {hint} ", self.search_query)
             } else {
                 let cur = self.search_cursor.map(|c| c + 1).unwrap_or(0);
                 format!(
-                    " /{}  [{}/{}]  n/N:next/prev  {hint} ",
+                    " {mode_badge}  /{}  [{}/{}]  n/N:next/prev  {hint} ",
                     self.search_query, cur, count,
                 )
             }
         } else if let Some(n) = self.pending_count {
             format!(
-                " {}  [count: {n}_]  G:jump  Esc:cancel  {hint} ",
-                self.title,
+                " {mode_badge}  [{}/{}]  [count: {n}_]  G:jump  Esc:cancel  {hint} ",
+                self.cursor_line + 1,
+                self.lines.len(),
             )
         } else {
             format!(
-                " {}  [{}/{}]  {hint} ",
-                self.title,
+                " {mode_badge}  [{}/{}]  {hint} ",
                 self.cursor_line + 1,
                 self.lines.len(),
             )
@@ -1146,6 +1161,75 @@ impl App {
         if self.mode == Mode::Dir {
             self.draw_dir(frame, body_area);
         }
+    }
+
+    /// Address-bar style header at the top of the window. Left side
+    /// carries the history affordance + the current source path; right
+    /// side shows scroll position (`top` / `<n>%` / `bot`). The whole
+    /// row uses reverse video to match the bottom status bar.
+    fn draw_header(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let style = RStyle::default().add_modifier(Modifier::REVERSED);
+        // Reserve room for the scroll-position chip on the right; the
+        // rest of the row is available to the path.
+        let pos_chip = format!(" {} ", self.scroll_position_label());
+        let pos_w = pos_chip.chars().count() as u16;
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(pos_w)])
+            .split(area);
+        let path_area = cols[0];
+        let pos_area = cols[1];
+
+        let dim = RStyle::default()
+            .fg(RColor::DarkGray)
+            .add_modifier(Modifier::REVERSED);
+        let bright = RStyle::default()
+            .fg(RColor::White)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        let back_style = if self.history_cursor > 0 { bright } else { dim };
+        let fwd_style = if self.history_cursor + 1 < self.history.len() {
+            bright
+        } else {
+            dim
+        };
+        // Account for ` ◀ ▶ ` (5 cells) + trailing space = 6 cells.
+        let path_room = (path_area.width as usize).saturating_sub(6);
+        let path = truncate_left(&self.title, path_room);
+        let header_line = Line::from(vec![
+            Span::styled(" ", style),
+            Span::styled("◀", back_style),
+            Span::styled(" ", style),
+            Span::styled("▶", fwd_style),
+            Span::styled(" ", style),
+            Span::styled(path, style),
+        ]);
+        frame.render_widget(Paragraph::new(header_line).style(style), path_area);
+        frame.render_widget(
+            Paragraph::new(pos_chip)
+                .style(style)
+                .alignment(ratatui::layout::Alignment::Right),
+            pos_area,
+        );
+    }
+
+    /// `top` / `<pct>%` / `bot` indicator for the address bar.
+    fn scroll_position_label(&self) -> String {
+        let total = self.total_screen_rows();
+        let body = self.body_height as usize;
+        if total <= body {
+            return "all".into();
+        }
+        if self.scroll == 0 {
+            return "top".into();
+        }
+        let max = self.max_scroll().max(1);
+        if self.scroll >= max {
+            return "bot".into();
+        }
+        // Percentage through the document at the *bottom* of the view —
+        // matches what most pagers (less, helix) show.
+        let pct = ((self.scroll + body) as f32 / total as f32 * 100.0).round() as u16;
+        format!("{}%", pct.min(99))
     }
 
     fn draw_help(&self, frame: &mut ratatui::Frame<'_>, body_area: Rect) {
@@ -1546,6 +1630,41 @@ fn push_strict_superset(path: &mut Vec<(usize, usize)>, range: (usize, usize)) {
     } else if path.is_empty() {
         path.push(range);
     }
+}
+
+/// Browser-style left truncation: keep the trailing portion of `s`
+/// inside `width` cells (Unicode-aware), prefixing with `…` when the
+/// front is dropped. Used by the address-bar header.
+fn truncate_left(s: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    if width == 0 {
+        return String::new();
+    }
+    let total = UnicodeWidthStr::width(s);
+    if total <= width {
+        return s.to_string();
+    }
+    // Reserve one cell for the leading `…`.
+    let budget = width.saturating_sub(1);
+    let graphemes: Vec<&str> = s.graphemes(true).collect();
+    let mut tail_w = 0usize;
+    let mut start = graphemes.len();
+    for (i, g) in graphemes.iter().enumerate().rev() {
+        let gw = UnicodeWidthStr::width(*g);
+        if tail_w + gw > budget {
+            break;
+        }
+        tail_w += gw;
+        start = i;
+    }
+    let mut out = String::with_capacity(s.len());
+    out.push('…');
+    for g in &graphemes[start..] {
+        out.push_str(g);
+    }
+    out
 }
 
 fn wrapped_rows_for_width(line_w: usize, body_w: usize) -> usize {
