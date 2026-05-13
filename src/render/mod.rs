@@ -34,6 +34,22 @@ pub struct RenderOutput {
     /// map a cursor line to the enclosing paragraph / list-item / blockquote
     /// / code block / table.
     pub blocks: Vec<BlockRange>,
+    /// Fenced code blocks whose info string starts with `mermaid`. Captures
+    /// the inclusive logical-line range covered by the block (fences
+    /// included) plus the raw source so the embedded preview server can
+    /// stream it to a browser when the cursor lands inside the range.
+    pub mermaid_blocks: Vec<MermaidBlock>,
+}
+
+/// A fenced code block tagged as `mermaid`, captured during render so the
+/// preview server can find it by cursor line.
+#[derive(Debug, Clone)]
+pub struct MermaidBlock {
+    /// Inclusive logical-line range covering the full block including fences.
+    pub start: usize,
+    pub end: usize,
+    /// Raw mermaid source (the body between the fences), unmodified.
+    pub source: String,
 }
 
 /// Inclusive line range for a markdown block.
@@ -63,4 +79,59 @@ pub fn render_document<'a>(root: &'a AstNode<'a>) -> RenderOutput {
         media: &media,
     };
     block::render_document(root, &ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::parse;
+    use comrak::Arena;
+
+    fn render(input: &str) -> RenderOutput {
+        let arena = Arena::new();
+        let root = parse::parse(&arena, input, false);
+        render_document(root)
+    }
+
+    #[test]
+    fn mermaid_block_is_captured() {
+        let input = "before\n\n```mermaid\ngraph TD\nA-->B\n```\n\nafter\n";
+        let out = render(input);
+        assert_eq!(out.mermaid_blocks.len(), 1);
+        let b = &out.mermaid_blocks[0];
+        assert_eq!(b.source, "graph TD\nA-->B\n");
+        // Range covers the fence top through fence bottom inclusive.
+        assert!(b.start < b.end);
+        let fence_top = &out.lines[b.start];
+        let fence_bottom = &out.lines[b.end];
+        let top_text: String = fence_top.spans.iter().map(|s| s.text.as_str()).collect();
+        let bot_text: String = fence_bottom.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(top_text.contains("mermaid"));
+        assert_eq!(bot_text.trim(), "```");
+    }
+
+    #[test]
+    fn non_mermaid_code_block_is_ignored() {
+        let input = "```rust\nfn main() {}\n```\n";
+        let out = render(input);
+        assert!(out.mermaid_blocks.is_empty());
+    }
+
+    #[test]
+    fn multiple_mermaid_blocks_are_captured_in_order() {
+        let input =
+            "```mermaid\ngraph TD\nA-->B\n```\n\nmiddle\n\n```mermaid\ngraph LR\nC-->D\n```\n";
+        let out = render(input);
+        assert_eq!(out.mermaid_blocks.len(), 2);
+        assert!(out.mermaid_blocks[0].source.contains("A-->B"));
+        assert!(out.mermaid_blocks[1].source.contains("C-->D"));
+        assert!(out.mermaid_blocks[0].end < out.mermaid_blocks[1].start);
+    }
+
+    #[test]
+    fn mermaid_lang_match_is_case_insensitive() {
+        let input = "```Mermaid\ngraph TD\nA-->B\n```\n";
+        let out = render(input);
+        assert_eq!(out.mermaid_blocks.len(), 1);
+    }
 }

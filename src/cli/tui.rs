@@ -14,12 +14,22 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListSt
 
 use crate::cli::keymap::{self, Action, Keymap};
 use crate::cli::net;
+use crate::cli::preview::{self, PreviewHandle};
 use crate::cli::source::{self, Source};
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
-use crate::render::{self, Anchor, BlockKind, BlockRange, Link, RenderOutput};
+use crate::render::{self, Anchor, BlockKind, BlockRange, Link, MermaidBlock, RenderOutput};
 
-pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
+/// Configuration for the embedded mermaid preview server. The TUI starts
+/// the server on launch and pushes the source of whichever mermaid block
+/// the cursor is currently inside (see issue #35).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreviewConfig {
+    pub enabled: bool,
+    pub port: Option<u16>,
+}
+
+pub fn run(arg: Option<&Path>, emoji: bool, preview_cfg: PreviewConfig) -> io::Result<()> {
     let arg = match arg {
         Some(p) if p.as_os_str() != "-" => p,
         Some(_) | None => {
@@ -73,9 +83,26 @@ pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
 
     let loaded = keymap::load();
 
+    let (preview_handle, preview_error) = if preview_cfg.enabled {
+        match preview::start(preview_cfg.port) {
+            Ok(h) => (Some(h), None),
+            // Don't abort the TUI just because the preview port is
+            // unavailable — surface the failure into the status bar and
+            // keep going.
+            Err(e) => (None, Some(format!("mermaid preview disabled: {e}"))),
+        }
+    } else {
+        (None, None)
+    };
+
     ratatui::run(move |terminal| {
         let mut app = App::new(doc, title, source, input, emoji);
         app.install_keymaps(loaded);
+        if let Some(h) = preview_handle {
+            app.attach_preview(h);
+        } else if let Some(msg) = preview_error {
+            app.status_message = Some(msg);
+        }
         if let Some(w) = watcher {
             app.attach_watcher(w, rx);
         }
@@ -272,6 +299,14 @@ struct App {
     keymap_toc: Keymap,
     keymap_help: Keymap,
     keymap_dir: Keymap,
+    /// Mermaid code blocks captured during the most recent parse. Used to
+    /// answer "does cursor_line fall inside a mermaid block, and if so
+    /// what's its source?" once per main-loop iteration.
+    mermaid_blocks: Vec<MermaidBlock>,
+    /// Embedded HTTP/SSE server that pushes the current mermaid block to a
+    /// browser tab. `None` when disabled via `--no-mermaid` or when the
+    /// listener failed to bind at startup.
+    preview: Option<PreviewHandle>,
 }
 
 impl App {
@@ -324,7 +359,17 @@ impl App {
             keymap_toc: keymap::default_toc(),
             keymap_help: keymap::default_help(),
             keymap_dir: keymap::default_dir(),
+            mermaid_blocks: doc.mermaid_blocks,
+            preview: None,
         }
+    }
+
+    fn attach_preview(&mut self, handle: PreviewHandle) {
+        let url = handle.url().to_string();
+        self.preview = Some(handle);
+        // Surface the URL once at startup; subsequent keypresses clear the
+        // message in the normal way.
+        self.status_message = Some(format!("mermaid preview: {url}"));
     }
 
     fn attach_watcher(&mut self, watcher: RecommendedWatcher, rx: Receiver<()>) {
@@ -400,6 +445,7 @@ impl App {
                 self.anchors = doc.anchors;
                 self.links = doc.links;
                 self.blocks = doc.blocks;
+                self.mermaid_blocks = doc.mermaid_blocks;
                 self.focused_link = None;
                 self.search_matches.clear();
                 self.search_cursor = None;
@@ -421,6 +467,7 @@ impl App {
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         loop {
+            self.push_mermaid_preview();
             terminal.draw(|frame| self.draw(frame))?;
 
             // Poll for input with a short timeout so we periodically wake
@@ -438,6 +485,25 @@ impl App {
                 self.reload_in_place();
             }
         }
+    }
+
+    /// If the cursor currently sits inside a mermaid block, push its source
+    /// to the preview server. Identical pushes are deduplicated by the
+    /// handle, so calling this every frame is cheap. When the cursor is
+    /// outside any mermaid block we deliberately do nothing — the browser
+    /// keeps showing the last rendered diagram, which lets the user park
+    /// the figure and read prose elsewhere in the file.
+    fn push_mermaid_preview(&mut self) {
+        let Some(handle) = self.preview.as_mut() else {
+            return;
+        };
+        let cursor = self.cursor_line;
+        let source = self
+            .mermaid_blocks
+            .iter()
+            .find(|b| b.start <= cursor && cursor <= b.end)
+            .map(|b| b.source.as_str());
+        handle.set_source(source);
     }
 
     /// Pull all pending file-change pings off the channel. Returns true if
@@ -912,6 +978,7 @@ impl App {
                 self.anchors = doc.anchors;
                 self.links = doc.links;
                 self.blocks = doc.blocks;
+                self.mermaid_blocks = doc.mermaid_blocks;
                 self.title = source.display();
                 self.source = source.clone();
                 self.scroll = 0;
@@ -1449,6 +1516,7 @@ impl App {
         self.anchors = doc.anchors;
         self.links = doc.links;
         self.blocks = doc.blocks;
+        self.mermaid_blocks = doc.mermaid_blocks;
         self.focused_link = None;
         self.cancel_yank();
         if !self.search_query.is_empty() {

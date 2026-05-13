@@ -11,7 +11,7 @@ use crate::render::inline;
 use crate::render::style::{Style, StyledLine, StyledSpan};
 use crate::render::table;
 use crate::render::theme::Theme;
-use crate::render::{BlockKind, BlockRange, RenderOutput};
+use crate::render::{BlockKind, BlockRange, MermaidBlock, RenderOutput};
 
 pub struct RenderContext<'r> {
     pub theme: &'r Theme,
@@ -247,6 +247,14 @@ fn render_block<'a>(
             }
             bottom.push_styled("```", ctx.theme.code_fence);
             out.lines.push(bottom);
+            let end = out.lines.len() - 1;
+            if lang.eq_ignore_ascii_case("mermaid") {
+                out.mermaid_blocks.push(MermaidBlock {
+                    start,
+                    end,
+                    source: literal.clone(),
+                });
+            }
             push_block(out, start, BlockKind::Leaf);
         }
 

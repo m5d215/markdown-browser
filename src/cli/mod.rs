@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 pub mod ansi;
 pub mod keymap;
 pub mod net;
+pub mod preview;
 pub mod render;
 pub mod source;
 pub mod tui;
@@ -23,6 +24,15 @@ pub struct Cli {
     /// Inside the TUI, press `e` to toggle at runtime.
     #[arg(long, global = true)]
     pub no_emoji: bool,
+
+    /// Disable the embedded mermaid preview server.
+    #[arg(long)]
+    pub no_mermaid: bool,
+
+    /// Bind the mermaid preview server to this port. Defaults to an
+    /// OS-assigned ephemeral port.
+    #[arg(long, value_name = "PORT")]
+    pub mermaid_port: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -55,6 +65,13 @@ pub fn run(cli: Cli) -> std::io::Result<()> {
             render::ColorChoice::resolve(color, no_color),
             emoji,
         ),
-        None => tui::run(cli.file.as_deref(), emoji),
+        None => tui::run(
+            cli.file.as_deref(),
+            emoji,
+            tui::PreviewConfig {
+                enabled: !cli.no_mermaid,
+                port: cli.mermaid_port,
+            },
+        ),
     }
 }

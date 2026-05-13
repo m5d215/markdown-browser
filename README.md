@@ -20,6 +20,7 @@ Status: early development.
 - **Yank with expand/shrink** — `y` enters yank mode and grows the selection (line → paragraph → list item / blockquote → heading section → whole document); `Y` shrinks; `Enter` copies to the OS clipboard
 - **Link following** — local `.md` files (relative and absolute), heading anchors (`#slug`), markdown URLs fetched in-app, and other URLs handed off to the OS
 - **HTTPS URL input** — accepts an `http(s)://` URL on the command line; markdown links to remote `.md` / `.markdown` files navigate in-app, with relative links resolved against the remote document's URL
+- **Mermaid live preview** — an embedded HTTP server streams the mermaid block under the cursor to a browser tab over SSE; the figure stays put when the cursor moves away, so you can read prose elsewhere while the diagram remains visible
 - **History navigation** — back / forward through visited locations
 - **In-app help** — `?` shows the full keybinding list
 - **Plain-text render subcommand** — `markdown-browser render <file>` writes ANSI-styled output to stdout, suitable for piping or snapshot testing
@@ -27,7 +28,6 @@ Status: early development.
 ### Out of scope (kept extensible)
 
 - Image rendering (Sixel / Kitty / iTerm2 inline)
-- Mermaid diagram rendering
 
 The renderer architecture exposes a pluggable trait so an alternative implementation can be slotted in later without restructuring callers.
 
@@ -81,6 +81,24 @@ Press `?` inside the TUI for the same list shown here.
 | `Y` (Shift-`y`)                | Shrink yank selection                           |
 | `Enter` (in yank mode)         | Copy selection to OS clipboard                  |
 | `Esc` (in yank mode)           | Cancel yank                                     |
+
+### Mermaid live preview
+
+On launch `markdown-browser` binds an HTTP server on `127.0.0.1` (random
+port by default) and prints the URL into the status bar. Open the URL in
+a browser once; thereafter, whenever the cursor sits inside a fenced
+code block tagged `mermaid` the diagram updates in the tab over SSE.
+When the cursor moves elsewhere the previous diagram stays on screen,
+so you can read prose alongside the figure.
+
+Flags:
+
+- `--no-mermaid` — disable the preview server entirely
+- `--mermaid-port <PORT>` — pin the port (useful when reverse-proxying
+  or sharing the tab between sessions)
+
+The mermaid runtime is bundled into the binary, so the page works
+without network access once the binary is downloaded.
 
 ### Customizing
 

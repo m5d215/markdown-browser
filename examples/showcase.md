@@ -210,6 +210,33 @@ ASCII 罫線も生のまま:
     +---+---+
 ```
 
+### Mermaid (browser-side preview)
+
+ターミナル内ではコードのままだが、`--mermaid` を有効にしたまま実行して
+ブラウザを起動時に表示された URL に向けると、カーソルがこのブロックに
+あるあいだ図がライブで描画される。カーソルを別の場所に動かしても直前の
+図はそのまま残る。
+
+```mermaid
+graph TD
+    A[markdown-browser] -->|SSE| B(Browser tab)
+    B --> C{Cursor on<br/>mermaid block?}
+    C -->|yes| D[Render diagram]
+    C -->|no| E[Keep previous]
+```
+
+複数ブロックに対応していて、カーソルが入ったブロックに切り替わる:
+
+```mermaid
+sequenceDiagram
+    participant TUI
+    participant Server
+    participant Browser
+    TUI->>Server: set_source(mermaid)
+    Server-->>Browser: SSE: mermaid event
+    Browser->>Browser: mermaid.render(svg)
+```
+
 ## 水平線
 
 下に thematic break が入る。
