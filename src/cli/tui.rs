@@ -10,9 +10,7 @@ use ratatui::DefaultTerminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::cli::net;
 use crate::cli::source::{self, Source};
@@ -1027,10 +1025,13 @@ impl App {
             self.scroll = max_scroll;
         }
 
+        let body_w = body_area.width as usize;
         let lines = self.convert_lines_for_display();
-        let body = Paragraph::new(lines)
-            .scroll((self.scroll as u16, 0))
-            .wrap(Wrap { trim: false });
+        let wrapped: Vec<Line<'static>> = lines
+            .into_iter()
+            .flat_map(|l| wrap_line(l, body_w))
+            .collect();
+        let body = Paragraph::new(wrapped).scroll((self.scroll as u16, 0));
         frame.render_widget(body, body_area);
 
         let hint = match self.mode {
@@ -1269,11 +1270,18 @@ impl App {
     }
 
     fn compute_screen_rows(&self, until: usize) -> usize {
-        let body_w = self.text_width().max(1);
+        let body_w = (self.body_width as usize).max(1);
+        let gutter = self.gutter_width();
         let end = until.min(self.lines.len());
         let mut rows = 0usize;
         for line in &self.lines[..end] {
-            rows += wrapped_rows(line, body_w);
+            // Count against the line as it'll be rendered: raw content +
+            // gutter prefix, char-wrapped to body_w. Padding (cursor /
+            // yank) tops content out at body_w so it stays a single row,
+            // which `wrapped_rows` already handles via the empty-line
+            // fallback when w == 0.
+            let w = spans_width(&line.spans) + gutter;
+            rows += wrapped_rows_for_width(w, body_w);
         }
         rows
     }
@@ -1287,11 +1295,6 @@ impl App {
         let max = self.lines.len().max(1);
         let digits = max.ilog10() as usize + 1;
         digits + 1
-    }
-
-    /// Width available for body text after the gutter.
-    fn text_width(&self) -> usize {
-        (self.body_width as usize).saturating_sub(self.gutter_width())
     }
 
     fn toggle_line_numbers(&mut self) {
@@ -1494,9 +1497,51 @@ fn push_strict_superset(path: &mut Vec<(usize, usize)>, range: (usize, usize)) {
     }
 }
 
-fn wrapped_rows(line: &StyledLine, body_w: usize) -> usize {
-    let w = spans_width(&line.spans);
-    if w == 0 { 1 } else { w.div_ceil(body_w).max(1) }
+fn wrapped_rows_for_width(line_w: usize, body_w: usize) -> usize {
+    let body_w = body_w.max(1);
+    if line_w == 0 {
+        1
+    } else {
+        line_w.div_ceil(body_w).max(1)
+    }
+}
+
+/// Hard char-boundary wrap of a ratatui `Line` to fit `body_w` cells.
+/// Drives the body view in `draw()`; we wrap ourselves and disable
+/// `Paragraph::wrap` so that `screen_row_of` matches what's on screen
+/// exactly. ratatui's `WordWrapper` would otherwise split at word
+/// boundaries and produce extra rows we can't account for, which made
+/// `G` fall short of the bottom on narrow viewports.
+fn wrap_line(line: Line<'static>, body_w: usize) -> Vec<Line<'static>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    let body_w = body_w.max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+
+    for span in line.spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for g in span.content.graphemes(true) {
+            let gw = UnicodeWidthStr::width(g);
+            if col > 0 && col + gw > body_w {
+                if !buf.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                out.push(Line::from(std::mem::take(&mut spans)));
+                col = 0;
+            }
+            buf.push_str(g);
+            col += gw;
+        }
+        if !buf.is_empty() {
+            spans.push(Span::styled(buf, style));
+        }
+    }
+    out.push(Line::from(spans));
+    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
