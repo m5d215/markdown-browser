@@ -12,6 +12,7 @@ use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 
+use crate::cli::keymap::{self, Action, Keymap};
 use crate::cli::net;
 use crate::cli::source::{self, Source};
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
@@ -261,6 +262,13 @@ struct App {
     file_events: Option<Receiver<()>>,
     /// Path currently registered with the watcher.
     watched_path: Option<PathBuf>,
+    /// Per-mode keymaps. Phase 1 just holds the defaults; Phase 2
+    /// will layer a user config file on top.
+    keymap_normal: Keymap,
+    keymap_yank: Keymap,
+    keymap_toc: Keymap,
+    keymap_help: Keymap,
+    keymap_dir: Keymap,
 }
 
 impl App {
@@ -308,6 +316,11 @@ impl App {
             watcher: None,
             file_events: None,
             watched_path: None,
+            keymap_normal: keymap::default_normal(),
+            keymap_yank: keymap::default_yank(),
+            keymap_toc: keymap::default_toc(),
+            keymap_help: keymap::default_help(),
+            keymap_dir: keymap::default_dir(),
         }
     }
 
@@ -464,13 +477,98 @@ impl App {
         }
     }
 
-    fn handle_key_help(&mut self, code: KeyCode, _mods: KeyModifiers) {
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
-                self.mode = Mode::Normal;
-            }
-            _ => {}
+    fn handle_key_help(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if let Some(action) = keymap::lookup(&self.keymap_help, code, mods) {
+            self.dispatch(action);
         }
+    }
+
+    /// Apply a resolved [`Action`]. The keymap-driven handlers all go
+    /// through here; returning `true` signals the event loop to exit.
+    /// New keybindings hook in by extending the `Action` enum and
+    /// adding one arm below — nothing else in the TUI moves.
+    fn dispatch(&mut self, action: Action) -> bool {
+        match action {
+            Action::Quit => return true,
+
+            Action::OpenToc => self.open_toc(),
+            Action::OpenHelp => self.mode = Mode::Help,
+            Action::OpenDir => self.open_dir(),
+            Action::ToggleLineNumbers => self.toggle_line_numbers(),
+            Action::ToggleShortcodes => self.toggle_shortcodes(),
+            Action::StartSearch => {
+                self.mode = Mode::Search;
+                self.search_input = Some(String::new());
+            }
+            Action::SearchNext => self.search_step(1),
+            Action::SearchPrev => self.search_step(-1),
+            Action::LinkNext => self.focus_next_link(1),
+            Action::LinkPrev => self.focus_next_link(-1),
+            Action::ActivateLink => self.activate_focused_link(),
+            Action::HistoryBack => self.go_back(),
+            Action::HistoryForward => self.go_forward(),
+            Action::CursorDown => self.cursor_by(1),
+            Action::CursorUp => self.cursor_by(-1),
+            Action::CursorHalfPageDown => self.cursor_by(self.half_page()),
+            Action::CursorHalfPageUp => self.cursor_by(-self.half_page()),
+            Action::CursorPageDown => self.cursor_by(self.page()),
+            Action::CursorPageUp => self.cursor_by(-self.page()),
+            Action::CursorTop => self.cursor_to(0),
+            Action::CursorBottom => self.cursor_to(self.last_line_index()),
+            Action::SectionNext => self.cursor_to_next_section(),
+            Action::SectionPrev => self.cursor_to_prev_section(),
+            Action::EnterYank => self.enter_yank(),
+
+            Action::YankCancel => self.cancel_yank(),
+            Action::YankExpand => self.yank_expand(),
+            Action::YankShrink => self.yank_shrink(),
+            Action::YankCopy => self.yank_copy(),
+
+            Action::TocClose => self.mode = Mode::Normal,
+            Action::TocSelectNext => {
+                if self.toc_selection + 1 < self.anchors.len() {
+                    self.toc_selection += 1;
+                }
+            }
+            Action::TocSelectPrev => {
+                if self.toc_selection > 0 {
+                    self.toc_selection -= 1;
+                }
+            }
+            Action::TocSelectTop => self.toc_selection = 0,
+            Action::TocSelectBottom => {
+                self.toc_selection = self.anchors.len().saturating_sub(1);
+            }
+            Action::TocConfirm => {
+                if !self.anchors.is_empty() {
+                    let line = self.anchors[self.toc_selection].line;
+                    self.jump_and_push(line);
+                    self.mode = Mode::Normal;
+                }
+            }
+
+            Action::HelpClose => self.mode = Mode::Normal,
+
+            Action::DirClose => self.close_dir(),
+            Action::DirSelectNext => {
+                let last = self.dir_rows.len().saturating_sub(1);
+                if self.dir_selection < last {
+                    self.dir_selection += 1;
+                }
+            }
+            Action::DirSelectPrev => {
+                if self.dir_selection > 0 {
+                    self.dir_selection -= 1;
+                }
+            }
+            Action::DirSelectTop => self.dir_selection = 0,
+            Action::DirSelectBottom => {
+                self.dir_selection = self.dir_rows.len().saturating_sub(1);
+            }
+            Action::DirActivate => self.activate_dir_entry(),
+            Action::DirGoUp => self.dir_go_up(),
+        }
+        false
     }
 
     fn handle_key_normal(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
@@ -504,94 +602,37 @@ impl App {
             return false;
         }
 
+        // `<count>G` / `<count>End` — line-jump prefix, handled before
+        // the keymap so the bare `G` still binds to `CursorBottom`.
         let count = self.pending_count.take();
-        match (code, mods) {
-            (KeyCode::Char('G'), _) | (KeyCode::End, _) => {
-                let target = count
-                    .map(|n| (n.max(1) - 1) as usize)
-                    .unwrap_or(self.last_line_index());
-                self.cursor_to(target);
-                return false;
-            }
-            _ => {}
+        if let Some(n) = count
+            && matches!((code, mods), (KeyCode::Char('G'), _) | (KeyCode::End, _))
+        {
+            let target = (n.max(1) - 1) as usize;
+            self.cursor_to(target);
+            return false;
         }
 
-        match (code, mods) {
-            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return true,
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
-            (KeyCode::Char('o'), _) => self.open_toc(),
-            (KeyCode::Char('?'), _) => self.mode = Mode::Help,
-            (KeyCode::Char('#'), _) => self.toggle_line_numbers(),
-            (KeyCode::Char('/'), _) => {
-                self.mode = Mode::Search;
-                self.search_input = Some(String::new());
-            }
-            (KeyCode::Char('n'), _) => self.search_step(1),
-            (KeyCode::Char('N'), _) => self.search_step(-1),
-            (KeyCode::Tab, _) => self.focus_next_link(1),
-            (KeyCode::BackTab, _) => self.focus_next_link(-1),
-            (KeyCode::Enter, _) => self.activate_focused_link(),
-            (KeyCode::Backspace, _)
-            | (KeyCode::Char('['), KeyModifiers::NONE)
-            | (KeyCode::Left, KeyModifiers::ALT) => self.go_back(),
-            (KeyCode::Char(']'), KeyModifiers::NONE) | (KeyCode::Right, KeyModifiers::ALT) => {
-                self.go_forward()
-            }
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.cursor_by(1),
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.cursor_by(-1),
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.cursor_by(self.half_page()),
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => self.cursor_by(-self.half_page()),
-            (KeyCode::Char('f'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
-                self.cursor_by(self.page())
-            }
-            (KeyCode::Char('b'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
-                self.cursor_by(-self.page())
-            }
-            (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.cursor_to(0),
-            (KeyCode::Char('}'), _) => self.cursor_to_next_section(),
-            (KeyCode::Char('{'), _) => self.cursor_to_prev_section(),
-            (KeyCode::Char('d'), KeyModifiers::NONE) => self.open_dir(),
-            (KeyCode::Char('e'), _) => self.toggle_shortcodes(),
-            (KeyCode::Char('y'), _) => self.enter_yank(),
-            _ => {}
+        if let Some(action) = keymap::lookup(&self.keymap_normal, code, mods) {
+            return self.dispatch(action);
         }
         false
     }
 
-    fn handle_key_yank(&mut self, code: KeyCode, _mods: KeyModifiers) {
+    fn handle_key_yank(&mut self, code: KeyCode, mods: KeyModifiers) {
         self.status_message = None;
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => self.cancel_yank(),
-            KeyCode::Char('y') => self.yank_expand(),
-            KeyCode::Char('Y') => self.yank_shrink(),
-            KeyCode::Enter => self.yank_copy(),
-            _ => {}
+        if let Some(action) = keymap::lookup(&self.keymap_yank, code, mods) {
+            self.dispatch(action);
         }
     }
 
-    fn handle_key_toc(&mut self, code: KeyCode, _mods: KeyModifiers) {
+    fn handle_key_toc(&mut self, code: KeyCode, mods: KeyModifiers) {
         if self.anchors.is_empty() {
             self.mode = Mode::Normal;
             return;
         }
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => {
-                self.mode = Mode::Normal;
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.toc_selection + 1 < self.anchors.len() => {
-                self.toc_selection += 1;
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.toc_selection > 0 => {
-                self.toc_selection -= 1;
-            }
-            KeyCode::Home | KeyCode::Char('g') => self.toc_selection = 0,
-            KeyCode::End | KeyCode::Char('G') => self.toc_selection = self.anchors.len() - 1,
-            KeyCode::Enter => {
-                let line = self.anchors[self.toc_selection].line;
-                self.jump_and_push(line);
-                self.mode = Mode::Normal;
-            }
-            _ => {}
+        if let Some(action) = keymap::lookup(&self.keymap_toc, code, mods) {
+            self.dispatch(action);
         }
     }
 
@@ -957,29 +998,10 @@ impl App {
         }
     }
 
-    fn handle_key_dir(&mut self, code: KeyCode, _mods: KeyModifiers) {
+    fn handle_key_dir(&mut self, code: KeyCode, mods: KeyModifiers) {
         self.status_message = None;
-        if self.dir_rows.is_empty() {
-            match code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => self.close_dir(),
-                _ => {}
-            }
-            return;
-        }
-        let last = self.dir_rows.len() - 1;
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => self.close_dir(),
-            KeyCode::Down | KeyCode::Char('j') if self.dir_selection < last => {
-                self.dir_selection += 1;
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.dir_selection > 0 => {
-                self.dir_selection -= 1;
-            }
-            KeyCode::Home | KeyCode::Char('g') => self.dir_selection = 0,
-            KeyCode::End | KeyCode::Char('G') => self.dir_selection = last,
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.activate_dir_entry(),
-            KeyCode::Left | KeyCode::Char('h') => self.dir_go_up(),
-            _ => {}
+        if let Some(action) = keymap::lookup(&self.keymap_dir, code, mods) {
+            self.dispatch(action);
         }
     }
 
