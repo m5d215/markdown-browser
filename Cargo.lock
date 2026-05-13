@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "markdown-browser"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "clap",

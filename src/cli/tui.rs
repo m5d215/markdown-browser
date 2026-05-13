@@ -14,12 +14,22 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListSt
 
 use crate::cli::keymap::{self, Action, Keymap};
 use crate::cli::net;
+use crate::cli::preview::{self, PreviewHandle};
 use crate::cli::source::{self, Source};
 use crate::render::style::{Color, Style, StyledLine, StyledSpan};
 use crate::render::width::spans_width;
-use crate::render::{self, Anchor, BlockKind, BlockRange, Link, RenderOutput};
+use crate::render::{self, Anchor, BlockKind, BlockRange, Link, MermaidBlock, RenderOutput};
 
-pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
+/// Configuration for the embedded mermaid preview server. The TUI starts
+/// the server on launch and pushes the source of whichever mermaid block
+/// the cursor is currently inside (see issue #35).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreviewConfig {
+    pub enabled: bool,
+    pub port: Option<u16>,
+}
+
+pub fn run(arg: Option<&Path>, emoji: bool, preview_cfg: PreviewConfig) -> io::Result<()> {
     let arg = match arg {
         Some(p) if p.as_os_str() != "-" => p,
         Some(_) | None => {
@@ -74,7 +84,7 @@ pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
     let loaded = keymap::load();
 
     ratatui::run(move |terminal| {
-        let mut app = App::new(doc, title, source, input, emoji);
+        let mut app = App::new(doc, title, source, input, emoji, preview_cfg);
         app.install_keymaps(loaded);
         if let Some(w) = watcher {
             app.attach_watcher(w, rx);
@@ -272,6 +282,23 @@ struct App {
     keymap_toc: Keymap,
     keymap_help: Keymap,
     keymap_dir: Keymap,
+    /// Mermaid code blocks captured during the most recent parse. Used to
+    /// answer "does cursor_line fall inside a mermaid block, and if so
+    /// what's its source?" once per main-loop iteration.
+    mermaid_blocks: Vec<MermaidBlock>,
+    /// CLI-supplied preview configuration. Stored so the server can be
+    /// started lazily on first cursor-on-mermaid event rather than at
+    /// every TUI launch.
+    preview_config: PreviewConfig,
+    /// Embedded HTTP/SSE server that pushes the current mermaid block to a
+    /// browser tab. Populated lazily on first need and reused for the
+    /// rest of the session. `None` when disabled, never started, or
+    /// after a startup failure (see `preview_failed`).
+    preview: Option<PreviewHandle>,
+    /// Set when a previous lazy-start attempt failed (e.g. the port was
+    /// already in use). Prevents retry storms on every cursor move into a
+    /// mermaid block.
+    preview_failed: bool,
 }
 
 impl App {
@@ -281,6 +308,7 @@ impl App {
         source: Source,
         raw_input: String,
         shortcodes: bool,
+        preview_config: PreviewConfig,
     ) -> Self {
         let initial = Location {
             source: source.clone(),
@@ -324,6 +352,10 @@ impl App {
             keymap_toc: keymap::default_toc(),
             keymap_help: keymap::default_help(),
             keymap_dir: keymap::default_dir(),
+            mermaid_blocks: doc.mermaid_blocks,
+            preview_config,
+            preview: None,
+            preview_failed: false,
         }
     }
 
@@ -400,6 +432,8 @@ impl App {
                 self.anchors = doc.anchors;
                 self.links = doc.links;
                 self.blocks = doc.blocks;
+                self.mermaid_blocks = doc.mermaid_blocks;
+                self.annotate_mermaid_fences();
                 self.focused_link = None;
                 self.search_matches.clear();
                 self.search_cursor = None;
@@ -421,6 +455,7 @@ impl App {
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         loop {
+            self.push_mermaid_preview();
             terminal.draw(|frame| self.draw(frame))?;
 
             // Poll for input with a short timeout so we periodically wake
@@ -436,6 +471,67 @@ impl App {
 
             if self.drain_file_events() {
                 self.reload_in_place();
+            }
+        }
+    }
+
+    /// If the cursor currently sits inside a mermaid block, push its source
+    /// to the preview server. Identical pushes are deduplicated by the
+    /// handle, so calling this every frame is cheap. When the cursor is
+    /// outside any mermaid block we deliberately do nothing — the browser
+    /// keeps showing the last rendered diagram, which lets the user park
+    /// the figure and read prose elsewhere in the file.
+    fn push_mermaid_preview(&mut self) {
+        let cursor = self.cursor_line;
+        let source = self
+            .mermaid_blocks
+            .iter()
+            .find(|b| b.start <= cursor && cursor <= b.end)
+            .map(|b| b.source.clone());
+        // Lazy-start the preview server on the first cursor entry into a
+        // mermaid block. Sessions that never touch a mermaid block never
+        // bind a port.
+        if source.is_some() {
+            self.ensure_preview_started();
+        }
+        if let Some(handle) = self.preview.as_mut() {
+            handle.set_source(source.as_deref());
+        }
+    }
+
+    /// Bind the preview server now if it hasn't been bound yet and the
+    /// CLI didn't disable it. On success, also annotate every mermaid
+    /// fence line with the preview URL so the user can find it without
+    /// hunting through the status bar.
+    fn ensure_preview_started(&mut self) {
+        if self.preview.is_some() || self.preview_failed || !self.preview_config.enabled {
+            return;
+        }
+        match preview::start(self.preview_config.port) {
+            Ok(handle) => {
+                self.preview = Some(handle);
+                self.annotate_mermaid_fences();
+            }
+            Err(e) => {
+                self.preview_failed = true;
+                self.status_message = Some(format!("mermaid preview disabled: {e}"));
+            }
+        }
+    }
+
+    /// Append `" <preview-url>"` to the top fence line of every mermaid
+    /// block so the URL appears inline with the code that triggered the
+    /// preview. Called once on lazy start and again after every reparse
+    /// while the server is running.
+    fn annotate_mermaid_fences(&mut self) {
+        let Some(handle) = self.preview.as_ref() else {
+            return;
+        };
+        let url = handle.url().to_string();
+        let style = Style::new().dim();
+        for block in &self.mermaid_blocks {
+            if let Some(line) = self.lines.get_mut(block.start) {
+                line.push_styled(format!(" {url}"), style);
             }
         }
     }
@@ -912,6 +1008,8 @@ impl App {
                 self.anchors = doc.anchors;
                 self.links = doc.links;
                 self.blocks = doc.blocks;
+                self.mermaid_blocks = doc.mermaid_blocks;
+                self.annotate_mermaid_fences();
                 self.title = source.display();
                 self.source = source.clone();
                 self.scroll = 0;
@@ -1449,6 +1547,8 @@ impl App {
         self.anchors = doc.anchors;
         self.links = doc.links;
         self.blocks = doc.blocks;
+        self.mermaid_blocks = doc.mermaid_blocks;
+        self.annotate_mermaid_fences();
         self.focused_link = None;
         self.cancel_yank();
         if !self.search_query.is_empty() {

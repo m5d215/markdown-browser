@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>markdown-browser preview</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+      --accent: #58a6ff;
+    }
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 0.5rem 1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  header h1 { margin: 0; font-size: 0.85rem; font-weight: 600; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+  header .status { font-size: 0.75rem; color: var(--muted); }
+  header .status .dot { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--muted); margin-right: 0.25rem; vertical-align: middle; }
+  header .status.live .dot { background: #22c55e; }
+  main { padding: 1.5rem; }
+  .placeholder { color: var(--muted); text-align: center; padding: 4rem 1rem; font-size: 0.95rem; }
+  .placeholder code { background: var(--border); padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.85em; }
+  .error { color: #dc2626; background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.3); padding: 1rem; border-radius: 0.375rem; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+  .mermaid { display: flex; justify-content: center; }
+  .mermaid svg { max-width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mermaid Preview</h1>
+  <span class="status" id="status"><span class="dot"></span>connecting…</span>
+</header>
+<main id="main">
+  <div class="placeholder">Place the cursor on a <code>mermaid</code> code block in <code>markdown-browser</code> to render it here.</div>
+</main>
+<script src="/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default', securityLevel: 'strict' });
+
+  const main = document.getElementById('main');
+  const status = document.getElementById('status');
+  let renderCounter = 0;
+
+  function setStatus(text, live) {
+    status.classList.toggle('live', !!live);
+    status.innerHTML = '<span class="dot"></span>' + text;
+  }
+
+  async function render(source) {
+    if (!source) {
+      main.innerHTML = '<div class="placeholder">Place the cursor on a <code>mermaid</code> code block in <code>markdown-browser</code> to render it here.</div>';
+      return;
+    }
+    const id = 'mermaid-' + (++renderCounter);
+    try {
+      const { svg } = await mermaid.render(id, source);
+      main.innerHTML = '<div class="mermaid">' + svg + '</div>';
+    } catch (err) {
+      main.innerHTML = '<div class="error">' + (err && err.message ? err.message : String(err)) + '</div>';
+    }
+  }
+
+  function connect() {
+    const es = new EventSource('/events');
+    es.addEventListener('open', () => setStatus('live', true));
+    es.addEventListener('mermaid', (e) => {
+      let payload;
+      try { payload = JSON.parse(e.data); } catch { payload = { source: '' }; }
+      render(payload.source || '');
+    });
+    es.addEventListener('error', () => {
+      setStatus('reconnecting…', false);
+      // EventSource auto-reconnects; no manual retry needed.
+    });
+  }
+
+  connect();
+</script>
+</body>
+</html>
