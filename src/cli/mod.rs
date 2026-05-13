@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub mod ansi;
+pub mod keymap;
 pub mod net;
 pub mod render;
 pub mod source;
