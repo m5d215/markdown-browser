@@ -3,21 +3,21 @@
 //!
 //! Lifecycle:
 //! - `start()` binds `127.0.0.1:port` (or an OS-assigned port when None),
-//!   spawns a server thread, and returns a [`PreviewHandle`] carrying the URL
-//!   and a sender for source updates.
-//! - The TUI calls [`PreviewHandle::set_source`] each frame; identical updates
-//!   are dropped at the handle level (single-frame hash compare), so callers
-//!   don't need to memoise.
-//! - SSE clients are kept open in dedicated threads. Dropping the handle
-//!   closes the listener; spawned client threads end when their socket dies.
+//!   spawns an accept thread, and returns a [`PreviewHandle`] carrying the
+//!   URL plus a sender for source updates.
+//! - The TUI calls [`PreviewHandle::set_source`] each frame; identical
+//!   updates are dropped at the handle level so callers don't need to
+//!   memoise.
+//! - The HTTP layer is hand-rolled to keep tight control over write
+//!   buffering — every SSE event is flushed immediately so EventSource
+//!   reports `open` as soon as headers go out and so cursor moves reach
+//!   the browser without sitting in a buffer.
 
-use std::io::{self, Read};
-use std::net::Ipv4Addr;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-
-use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 const INDEX_HTML: &str = include_str!("../../assets/preview.html");
 const MERMAID_JS: &[u8] = include_bytes!("../../assets/mermaid.min.js");
@@ -58,18 +58,14 @@ impl PreviewHandle {
 }
 
 pub fn start(port: Option<u16>) -> io::Result<PreviewHandle> {
-    let addr = (Ipv4Addr::LOCALHOST, port.unwrap_or(0));
-    let server = Server::http(addr).map_err(|e| io::Error::other(e.to_string()))?;
-    let bound = match server.server_addr() {
-        tiny_http::ListenAddr::IP(addr) => addr,
-        _ => return Err(io::Error::other("unexpected listen address")),
-    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
+    let bound = listener.local_addr()?;
     let url = format!("http://{}:{}", bound.ip(), bound.port());
     let state = Arc::new(Mutex::new(SharedState::default()));
     let server_state = Arc::clone(&state);
     thread::Builder::new()
         .name("preview-server".into())
-        .spawn(move || run_server(server, server_state))?;
+        .spawn(move || accept_loop(listener, server_state))?;
     Ok(PreviewHandle {
         url,
         state,
@@ -77,101 +73,126 @@ pub fn start(port: Option<u16>) -> io::Result<PreviewHandle> {
     })
 }
 
-fn run_server(server: Server, state: Arc<Mutex<SharedState>>) {
-    for request in server.incoming_requests() {
-        if request.method() != &Method::Get {
-            let _ = request.respond(
-                Response::from_string("method not allowed").with_status_code(StatusCode(405)),
-            );
-            continue;
-        }
-        match request.url() {
-            "/" | "/index.html" => {
-                let resp = Response::from_string(INDEX_HTML).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-                        .unwrap(),
-                );
-                let _ = request.respond(resp);
+fn accept_loop(listener: TcpListener, state: Arc<Mutex<SharedState>>) {
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let state = Arc::clone(&state);
+        // Each connection is handled in its own thread so SSE streams can
+        // park on `rx.recv()` without blocking new requests.
+        thread::spawn(move || {
+            if let Err(_e) = handle_connection(stream, state) {
+                // Client disconnects mid-response are routine; suppress.
             }
-            "/mermaid.min.js" => {
-                let resp = Response::from_data(MERMAID_JS)
-                    .with_header(
-                        Header::from_bytes(
-                            &b"Content-Type"[..],
-                            &b"application/javascript; charset=utf-8"[..],
-                        )
-                        .unwrap(),
-                    )
-                    .with_header(
-                        Header::from_bytes(
-                            &b"Cache-Control"[..],
-                            &b"public, max-age=31536000, immutable"[..],
-                        )
-                        .unwrap(),
-                    );
-                let _ = request.respond(resp);
-            }
-            "/events" => {
-                let (tx, rx) = mpsc::channel::<String>();
-                {
-                    let mut guard = state.lock().unwrap();
-                    if let Some(event) = guard.last_event.as_ref() {
-                        let _ = tx.send(event.clone());
-                    }
-                    guard.subscribers.push(tx);
-                }
-                let headers = vec![
-                    Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap(),
-                    Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap(),
-                    Header::from_bytes(&b"X-Accel-Buffering"[..], &b"no"[..]).unwrap(),
-                ];
-                let resp = Response::new(StatusCode(200), headers, SseReader::new(rx), None, None);
-                // SSE responses are long-lived; hand each one off to its own
-                // thread so the recv() loop stays responsive.
-                thread::spawn(move || {
-                    let _ = request.respond(resp);
-                });
-            }
-            _ => {
-                let _ = request
-                    .respond(Response::from_string("not found").with_status_code(StatusCode(404)));
-            }
-        }
+        });
     }
 }
 
-struct SseReader {
-    rx: Receiver<String>,
-    pending: Vec<u8>,
-    pos: usize,
-}
+fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) -> io::Result<()> {
+    // Disable Nagle so SSE events reach the browser without the 40 ms
+    // delayed-ACK / Nagle interaction stretching them.
+    let _ = stream.set_nodelay(true);
 
-impl SseReader {
-    fn new(rx: Receiver<String>) -> Self {
-        Self {
-            rx,
-            pending: Vec::new(),
-            pos: 0,
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
+    // Drain the rest of the request headers; we don't act on them.
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
         }
+    }
+
+    if method != "GET" {
+        return write_simple(
+            &mut stream,
+            405,
+            "Method Not Allowed",
+            b"method not allowed",
+        );
+    }
+
+    match path {
+        "/" | "/index.html" => write_static(
+            &mut stream,
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes(),
+            false,
+        ),
+        "/mermaid.min.js" => write_static(
+            &mut stream,
+            "application/javascript; charset=utf-8",
+            MERMAID_JS,
+            true,
+        ),
+        "/events" => handle_sse(stream, state),
+        _ => write_simple(&mut stream, 404, "Not Found", b"not found"),
     }
 }
 
-impl Read for SseReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.pending.len() {
-            match self.rx.recv() {
-                Ok(s) => {
-                    self.pending = s.into_bytes();
-                    self.pos = 0;
-                }
-                Err(_) => return Ok(0),
-            }
+fn write_simple(stream: &mut TcpStream, code: u16, reason: &str, body: &[u8]) -> io::Result<()> {
+    let headers = format!(
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.write_all(body)?;
+    Ok(())
+}
+
+fn write_static(
+    stream: &mut TcpStream,
+    content_type: &str,
+    body: &[u8],
+    cacheable: bool,
+) -> io::Result<()> {
+    let cache = if cacheable {
+        "Cache-Control: public, max-age=31536000, immutable\r\n"
+    } else {
+        "Cache-Control: no-cache\r\n"
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{cache}Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.write_all(body)?;
+    Ok(())
+}
+
+fn handle_sse(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) -> io::Result<()> {
+    // No `Content-Length` or `Transfer-Encoding`: this is a long-lived
+    // response that ends when the connection closes. HTTP/1.0-style "body
+    // until EOF" framing keeps the write path trivial and lets each event
+    // hit the wire after a single `flush()` with no chunked-encoding
+    // accumulator getting in the way.
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n";
+    stream.write_all(headers.as_bytes())?;
+    stream.flush()?;
+
+    let (tx, rx) = mpsc::channel::<String>();
+    {
+        let mut guard = state.lock().unwrap();
+        if let Some(event) = guard.last_event.as_ref() {
+            let _ = tx.send(event.clone());
         }
-        let n = std::cmp::min(buf.len(), self.pending.len() - self.pos);
-        buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
+        guard.subscribers.push(tx);
     }
+
+    while let Ok(event) = rx.recv() {
+        if stream.write_all(event.as_bytes()).is_err() {
+            break;
+        }
+        if stream.flush().is_err() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn format_event(event: &str, source: &str) -> String {
@@ -238,7 +259,6 @@ mod tests {
         handle.set_source(Some("graph TD\nA-->B"));
         handle.set_source(Some("graph TD\nA-->B")); // dedup
         handle.set_source(Some("graph LR\nC-->D"));
-        // Should have received exactly 2 events.
         let first = rx.recv().unwrap();
         assert!(first.contains("A-->B"));
         let second = rx.recv().unwrap();
