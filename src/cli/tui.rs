@@ -71,8 +71,11 @@ pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
         })
         .ok();
 
+    let loaded = keymap::load();
+
     ratatui::run(move |terminal| {
         let mut app = App::new(doc, title, source, input, emoji);
+        app.install_keymaps(loaded);
         if let Some(w) = watcher {
             app.attach_watcher(w, rx);
         }
@@ -328,6 +331,32 @@ impl App {
         self.watcher = Some(watcher);
         self.file_events = Some(rx);
         self.refresh_watch();
+    }
+
+    /// Replace the per-mode keymaps with the merged result from
+    /// `keymap::load`. Any warnings collected while parsing the user
+    /// config are funneled into the status bar so the user finds out
+    /// about a bad config without having to dig through logs.
+    fn install_keymaps(&mut self, loaded: keymap::LoadedKeymaps) {
+        self.keymap_normal = loaded.normal;
+        self.keymap_yank = loaded.yank;
+        self.keymap_toc = loaded.toc;
+        self.keymap_help = loaded.help;
+        self.keymap_dir = loaded.dir;
+        if !loaded.warnings.is_empty() {
+            let path = loaded
+                .config_path
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "config".into());
+            let head = &loaded.warnings[0];
+            let extra = loaded.warnings.len().saturating_sub(1);
+            self.status_message = Some(if extra == 0 {
+                format!("{path}: {head}")
+            } else {
+                format!("{path}: {head} (+{extra} more)")
+            });
+        }
     }
 
     /// Re-target the filesystem watcher at `self.source`, replacing any

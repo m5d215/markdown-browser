@@ -82,6 +82,30 @@ Press `?` inside the TUI for the same list shown here.
 | `Enter` (in yank mode)         | Copy selection to OS clipboard                  |
 | `Esc` (in yank mode)           | Cancel yank                                     |
 
+### Customizing
+
+Drop a TOML file at `$XDG_CONFIG_HOME/markdown-browser/config.toml` (default
+`~/.config/markdown-browser/config.toml`) to override or extend the defaults.
+Modes: `normal`, `yank`, `toc`, `help`, `dir`. Action names are the
+snake_case form of the variants in `src/cli/keymap.rs`.
+
+```toml
+[keys.normal]
+"shift+h" = "history_back"
+"shift+l" = "history_forward"
+"ctrl+e" = "toggle_shortcodes"
+
+[keys.dir]
+"backspace" = "dir_go_up"
+```
+
+Key syntax: modifiers as `ctrl+` / `alt+` / `shift+` prefixes (any order,
+case-insensitive); the key is either a single character (case-sensitive),
+a named key (`esc`, `enter`, `tab`, `backtab`, `space`, `left`, `up`,
+`pageup`, ...) or `f1`–`f12`. Unknown keys or actions surface as a
+startup warning in the status bar — markdown-browser never aborts on a
+bad config.
+
 ## License
 
 [MIT](LICENSE-MIT).
