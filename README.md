@@ -84,16 +84,24 @@ Press `?` inside the TUI for the same list shown here.
 
 ### Mermaid live preview
 
-On launch `markdown-browser` binds an HTTP server on `127.0.0.1` (random
-port by default) and prints the URL into the status bar. Open the URL in
-a browser once; thereafter, whenever the cursor sits inside a fenced
-code block tagged `mermaid` the diagram updates in the tab over SSE.
-When the cursor moves elsewhere the previous diagram stays on screen,
-so you can read prose alongside the figure.
+The first time the cursor lands inside a fenced code block tagged
+`mermaid`, `markdown-browser` lazily binds an HTTP server on `127.0.0.1`
+(random port by default) and appends the preview URL to every mermaid
+fence line in the buffer:
+
+```
+``` mermaid http://127.0.0.1:54321
+```
+
+Open that URL in a browser once and the tab live-renders whichever
+mermaid block the cursor is currently on. When the cursor moves
+outside a mermaid block the previous diagram stays on screen, so you
+can read prose alongside the figure.
 
 Flags:
 
-- `--no-mermaid` — disable the preview server entirely
+- `--no-mermaid` — disable the preview server entirely (it won't bind a
+  port even if you visit a mermaid block)
 - `--mermaid-port <PORT>` — pin the port (useful when reverse-proxying
   or sharing the tab between sessions)
 
