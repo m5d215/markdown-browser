@@ -26,13 +26,31 @@ pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
         Some(_) | None => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "TUI mode requires a file path or URL. Use `markdown-browser render` for stdin input.",
+                "TUI mode requires a file path, directory, or URL. Use `markdown-browser render` for stdin input.",
             ));
         }
     };
-    let source = Source::from_arg(&arg.to_string_lossy());
+    let mut source = Source::from_arg(&arg.to_string_lossy());
 
-    let input = read_source(&source).map_err(io::Error::other)?;
+    // `markdown-browser <dir>` — pick the README as the underlying
+    // document when one exists, otherwise carry no buffer at all and
+    // let the directory browser drive everything.
+    let mut open_dir_at_start = false;
+    if let Source::File(p) = &source
+        && p.is_dir()
+    {
+        let dir = p.clone();
+        open_dir_at_start = true;
+        source = match source::find_readme(&dir) {
+            Some(readme) => Source::File(readme),
+            None => Source::Dir(dir),
+        };
+    }
+
+    let input = match &source {
+        Source::Dir(_) => String::new(),
+        _ => read_source(&source).map_err(io::Error::other)?,
+    };
     let doc = parse_and_render(&input, emoji);
     let title = source.display();
 
@@ -59,6 +77,9 @@ pub fn run(arg: Option<&Path>, emoji: bool) -> io::Result<()> {
         if let Some(w) = watcher {
             app.attach_watcher(w, rx);
         }
+        if open_dir_at_start {
+            app.open_dir();
+        }
         app.run(terminal)
     })
 }
@@ -67,6 +88,7 @@ fn read_source(source: &Source) -> Result<String, String> {
     match source {
         Source::File(p) => std::fs::read_to_string(p).map_err(|e| e.to_string()),
         Source::Url(u) => net::fetch(u),
+        Source::Dir(_) => Ok(String::new()),
     }
 }
 
@@ -839,6 +861,13 @@ impl App {
                 }
                 self.refresh_watch();
                 self.status_message = None;
+                // A dir source carries no buffer — the directory browser
+                // is the actual view, so open it automatically (covers
+                // history navigation back to a `markdown-browser <dir>`
+                // start).
+                if matches!(source, Source::Dir(_)) {
+                    self.open_dir();
+                }
                 true
             }
             Err(e) => {
@@ -852,20 +881,27 @@ impl App {
     /// No-op + status message for URL sources or any I/O failure — the
     /// underlying document view stays put.
     fn open_dir(&mut self) {
-        let Some(file) = self.source.as_file().map(Path::to_path_buf) else {
-            self.status_message = Some("directory browser unavailable for URL sources".into());
-            return;
+        let (dir, focus): (PathBuf, PathBuf) = match &self.source {
+            Source::Dir(d) => (d.clone(), d.clone()),
+            Source::File(f) => {
+                let f = f.clone();
+                let Some(parent) = f.parent() else {
+                    self.status_message = Some("no parent directory".into());
+                    return;
+                };
+                let dir = if parent.as_os_str().is_empty() {
+                    Path::new(".").to_path_buf()
+                } else {
+                    parent.to_path_buf()
+                };
+                (dir, f)
+            }
+            Source::Url(_) => {
+                self.status_message = Some("directory browser unavailable for URL sources".into());
+                return;
+            }
         };
-        let Some(parent) = file.parent() else {
-            self.status_message = Some("no parent directory".into());
-            return;
-        };
-        let dir = if parent.as_os_str().is_empty() {
-            Path::new(".").to_path_buf()
-        } else {
-            parent.to_path_buf()
-        };
-        self.load_dir(dir, &file);
+        self.load_dir(dir, &focus);
     }
 
     fn load_dir(&mut self, dir: PathBuf, focus_on: &Path) {
@@ -1925,6 +1961,7 @@ fn classify_link(link: &str, current: &Source) -> LinkTarget {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(".")),
+        Source::Dir(p) => p.clone(),
         Source::Url(_) => PathBuf::from("."),
     };
     if let Some((path, anchor)) = link.split_once('#') {

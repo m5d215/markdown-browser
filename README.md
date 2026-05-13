@@ -42,8 +42,10 @@ cargo install --git https://github.com/m5d215/markdown-browser  # build from sou
 
 ```bash
 markdown-browser <file>             # open the TUI browser
+markdown-browser <dir>              # open README + directory browser (e.g. `markdown-browser .`)
 markdown-browser <url>              # open a remote markdown document
 markdown-browser render <file>      # write ANSI-styled output to stdout
+markdown-browser render <dir>       # render the directory's README
 markdown-browser render <url>       # render a remote markdown document
 cat foo.md | markdown-browser render
 ```

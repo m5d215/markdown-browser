@@ -53,6 +53,14 @@ fn read_input(file: Option<&Path>) -> io::Result<String> {
             let as_str = path.to_string_lossy();
             if source::is_url(&as_str) {
                 net::fetch(&as_str).map_err(io::Error::other)
+            } else if path.is_dir() {
+                let readme = source::find_readme(path).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("no README found in {}", path.display()),
+                    )
+                })?;
+                std::fs::read_to_string(readme)
             } else {
                 std::fs::read_to_string(path)
             }

@@ -14,8 +14,8 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Markdown file or `http(s)://` URL to open. Use "-" or omit to
-    /// read from stdin.
+    /// Markdown file, directory (opens README + the directory browser),
+    /// or `http(s)://` URL to open. Use "-" or omit to read from stdin.
     pub file: Option<PathBuf>,
 
     /// Disable GitHub-style emoji shortcodes (`:rocket:` stays as text).
@@ -28,8 +28,8 @@ pub struct Cli {
 pub enum Command {
     /// Render a markdown file as styled text to stdout.
     Render {
-        /// Markdown file or `http(s)://` URL to render. Use "-" or omit
-        /// to read from stdin.
+        /// Markdown file, directory (renders the README inside), or
+        /// `http(s)://` URL. Use "-" or omit to read from stdin.
         file: Option<PathBuf>,
 
         /// Force ANSI color output even when stdout is not a TTY.
