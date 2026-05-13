@@ -856,6 +856,7 @@ dependencies = [
  "open",
  "ratatui",
  "syntect",
+ "unicode-segmentation",
  "unicode-width",
  "ureq",
  "url",
